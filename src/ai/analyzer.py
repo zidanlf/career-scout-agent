@@ -1,0 +1,300 @@
+"""
+AI Analyzer for Career Scout Agent
+Uses OpenRouter API to analyze job-CV fit with multi-CV comparison.
+Features three-tier model fallback and model tracing.
+"""
+
+import json
+import httpx
+import logging
+import os
+import re
+from typing import Optional
+
+# Configure module logger
+logger = logging.getLogger(__name__)
+
+# OpenRouter API endpoint
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Three-tier model priority list (verified available on OpenRouter)
+MODEL_PRIORITY = [
+    "tngtech/deepseek-r1t2-chimera:free",
+    "stepfun/step-3.5-flash:free",
+    "openrouter/free"
+]
+
+
+def _build_prompt(job_description: str, cvs: dict[str, str]) -> str:
+    """Build the analysis prompt with job description and all CVs."""
+    cv_section = "\n\n".join([
+        f"=== CV Label: {label} ===\n{content}"
+        for label, content in cvs.items()
+    ])
+    
+    return f"""You are a career advisor. Analyze the job description and compare it against the provided CV(s) to determine the best match.
+
+## Job Description:
+{job_description}
+
+## Available CVs:
+{cv_section}
+
+## Task:
+1. Compare the job requirements against ALL provided CVs
+2. Identify which CV is the BEST match
+3. Calculate a match score from 0-100
+4. List key strengths (skills/experience that match)
+5. List gaps (missing requirements)
+
+## Output Format:
+Respond ONLY with valid JSON (no markdown, no explanation):
+{{"best_cv": "LABEL", "score": 0-100, "justification": "brief reason", "strengths": ["strength1", "strength2"], "gaps": ["gap1", "gap2"]}}"""
+
+
+def _extract_json(response_text: str) -> Optional[dict]:
+    """
+    Extract JSON from response with robust handling for:
+    - Direct JSON
+    - Markdown code blocks
+    - DeepSeek's <think> tags (various formats)
+    - Extra text around JSON
+    """
+    if not response_text:
+        logger.warning("Empty response text received")
+        return None
+    
+    logger.debug(f"Raw response length: {len(response_text)} chars")
+    
+    # Step 1: Remove ALL think-related tags (various formats DeepSeek might use)
+    # Handles: <think>...</think>, <thinking>...</thinking>, <thought>...</thought>
+    cleaned = re.sub(r'<think(?:ing)?(?:\s[^>]*)?>.*?</think(?:ing)?>', '', response_text, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r'<thought(?:\s[^>]*)?>.*?</thought>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+    
+    # Also remove any remaining XML-like tags that might wrap the response
+    cleaned = re.sub(r'<[^>]+>', '', cleaned)
+    cleaned = cleaned.strip()
+    
+    logger.debug(f"Cleaned response length: {len(cleaned)} chars")
+    
+    # Step 2: Try direct parse
+    try:
+        result = json.loads(cleaned)
+        logger.debug("Direct JSON parse successful")
+        return result
+    except json.JSONDecodeError:
+        pass
+    
+    # Step 3: Try to extract JSON from markdown code block
+    json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', cleaned, re.DOTALL)
+    if json_match:
+        try:
+            result = json.loads(json_match.group(1).strip())
+            logger.debug("Markdown code block JSON parse successful")
+            return result
+        except json.JSONDecodeError:
+            pass
+    
+    # Step 4: Find JSON objects - try multiple patterns
+    # Pattern for nested JSON with arrays
+    patterns = [
+        r'\{[^{}]*"best_cv"[^{}]*"score"[^{}]*\}',  # Simple object with key fields
+        r'\{(?:[^{}]|\{[^{}]*\}|\[[^\[\]]*\])*\}',   # Object with nested braces/brackets
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, cleaned, re.DOTALL)
+        for match in matches:
+            try:
+                parsed = json.loads(match)
+                if "best_cv" in parsed or "score" in parsed:
+                    logger.debug(f"Pattern match JSON parse successful")
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+    
+    # Step 5: Last resort - find anything that looks like JSON with required keys
+    # Extract from first { to last }
+    first_brace = cleaned.find('{')
+    last_brace = cleaned.rfind('}')
+    
+    if first_brace != -1 and last_brace > first_brace:
+        potential_json = cleaned[first_brace:last_brace + 1]
+        try:
+            parsed = json.loads(potential_json)
+            if isinstance(parsed, dict):
+                logger.debug("Brace extraction JSON parse successful")
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    
+    # Log failure with sample of response for debugging
+    sample = response_text[:500] if len(response_text) > 500 else response_text
+    logger.error(f"Failed to extract JSON. Response sample: {sample}")
+    return None
+
+
+async def _call_openrouter(
+    prompt: str, 
+    api_key: str,
+    model: str,
+    timeout: float = 60.0
+) -> Optional[str]:
+    """Make API call to OpenRouter with specified model."""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/career-scout-agent",
+        "X-Title": "Career Scout Agent"
+    }
+    
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.3,  # Lower temperature for consistent JSON output
+        "max_tokens": 2000   # Increased to prevent truncation
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                OPENROUTER_URL,
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            
+            if not content:
+                logger.warning(f"Empty content from {model}")
+                return None
+                
+            logger.debug(f"Response from {model}: {len(content)} chars")
+            return content
+            
+    except httpx.TimeoutException:
+        logger.warning(f"Timeout with model {model} (>{timeout}s)")
+        return None
+    except httpx.HTTPStatusError as e:
+        logger.warning(f"HTTP error with model {model}: {e.response.status_code}")
+        return None
+    except Exception as e:
+        logger.warning(f"API call failed with model {model}: {e}")
+        return None
+
+
+async def _call_with_fallback(
+    prompt: str,
+    api_key: str,
+    timeout: float = 60.0
+) -> tuple[Optional[str], Optional[str]]:
+    """
+    Call OpenRouter with three-tier fallback.
+    Returns tuple of (response_content, model_used) or (None, None) if all fail.
+    """
+    for model in MODEL_PRIORITY:
+        logger.info(f"Trying model: {model}")
+        response = await _call_openrouter(prompt, api_key, model, timeout)
+        
+        if response:
+            # Validate that we can extract JSON before declaring success
+            test_result = _extract_json(response)
+            if test_result:
+                logger.info(f"Successfully analyzed using {model}")
+                return response, model
+            else:
+                logger.warning(f"Model {model} returned unparseable response, trying next...")
+                continue
+        
+        logger.warning(f"Model {model} failed, trying next...")
+    
+    logger.error("All models failed")
+    return None, None
+
+
+async def analyze_job_fit(
+    job_description: str, 
+    cvs: dict[str, str],
+    api_key: Optional[str] = None
+) -> Optional[dict]:
+    """
+    Analyze job-CV fit using AI with three-tier model fallback.
+    
+    Args:
+        job_description: The job posting description
+        cvs: Dictionary of {label: cv_content}
+        api_key: OpenRouter API key (uses env var if not provided)
+    
+    Returns:
+        Dict with keys: best_cv, score, justification, strengths, gaps, model_used
+        Or None if analysis fails
+    """
+    if not cvs:
+        logger.warning("No CVs provided for analysis")
+        return None
+    
+    # Get API key
+    key = api_key or os.getenv("OPENROUTER_API_KEY")
+    if not key:
+        logger.error("OpenRouter API key not configured")
+        return None
+    
+    # Build and send prompt
+    prompt = _build_prompt(job_description, cvs)
+    
+    logger.info(f"Analyzing job against {len(cvs)} CV(s)...")
+    
+    # Call with three-tier fallback
+    response, model_used = await _call_with_fallback(prompt, key, timeout=60.0)
+    
+    if not response:
+        logger.error("No response from any AI model")
+        return None
+    
+    # Parse response
+    result = _extract_json(response)
+    
+    if result:
+        # Validate required fields
+        required = ["best_cv", "score", "justification"]
+        if all(k in result for k in required):
+            # Ensure score is integer
+            result["score"] = int(result.get("score", 0))
+            # Ensure arrays exist
+            result.setdefault("strengths", [])
+            result.setdefault("gaps", [])
+            # Add model tracing
+            result["model_used"] = model_used
+            
+            logger.info(f"Analysis complete: CV '{result['best_cv']}' scored {result['score']} (via {model_used})")
+            return result
+        else:
+            logger.error(f"Missing required fields in response: {result}")
+            return None
+    
+    return None
+
+
+async def analyze_single_job(
+    job: dict,
+    cvs: dict[str, str],
+    api_key: Optional[str] = None
+) -> Optional[dict]:
+    """
+    Convenience function to analyze a single job dict.
+    
+    Args:
+        job: Job dict with 'title', 'description', etc.
+        cvs: Dictionary of {label: cv_content}
+        api_key: Optional API key override
+    
+    Returns:
+        Analysis result dict with model_used field, or None
+    """
+    # Combine title and description for better context
+    job_text = f"Title: {job.get('title', '')}\n\n{job.get('description', '')}"
+    return await analyze_job_fit(job_text, cvs, api_key)
