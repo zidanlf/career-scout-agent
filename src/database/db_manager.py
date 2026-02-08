@@ -53,6 +53,17 @@ async def init_db() -> None:
             )
         """)
         
+        # Monitored URLs table for web discovery
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS monitored_urls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(telegram_id) ON DELETE CASCADE,
+                url TEXT NOT NULL,
+                label TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         await db.commit()
         logger.info("Database initialized successfully")
 
@@ -236,4 +247,62 @@ async def get_db_stats() -> dict:
         async with db.execute("SELECT COUNT(*) FROM processed_jobs") as cursor:
             stats["processed_jobs"] = (await cursor.fetchone())[0]
         
+        async with db.execute("SELECT COUNT(*) FROM monitored_urls") as cursor:
+            stats["monitored_urls"] = (await cursor.fetchone())[0]
+        
         return stats
+
+
+# ============== MONITORED URL OPERATIONS ==============
+
+async def add_monitored_url(user_id: int, url: str, label: str) -> int:
+    """Add a monitored URL for a user. Returns the new ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO monitored_urls (user_id, url, label)
+            VALUES (?, ?, ?)
+            """,
+            (user_id, url, label.upper())
+        )
+        await db.commit()
+        new_id = cursor.lastrowid
+        logger.info(f"Monitored URL added: id={new_id} user={user_id} label={label.upper()}")
+        return new_id
+
+
+async def get_monitored_urls(user_id: int) -> list:
+    """Get all monitored URLs for a user."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, url, label, created_at FROM monitored_urls WHERE user_id = ?",
+            (user_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def get_all_monitored_urls() -> list:
+    """Get all monitored URLs from all users (for scheduled scan)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, user_id, url, label FROM monitored_urls"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def delete_monitored_url(user_id: int, url_id: int) -> bool:
+    """Delete a monitored URL by ID. Returns True if deleted."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM monitored_urls WHERE id = ? AND user_id = ?",
+            (url_id, user_id)
+        )
+        await db.commit()
+        deleted = cursor.rowcount > 0
+        if deleted:
+            logger.info(f"Monitored URL deleted: id={url_id} user={user_id}")
+        return deleted
