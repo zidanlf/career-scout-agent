@@ -86,19 +86,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"<b>Welcome, {user.first_name}!</b>\n"
         "You have been registered in Career Scout.\n\n"
         "<b>CV Management</b>\n"
-        "/addcv - Add CV via text\n"
-        "/delcv - Delete a CV\n"
+        "/addcv &lt;label&gt; &lt;text&gt; - Add CV content\n"
+        "/delcv &lt;label&gt; - Delete a CV\n"
         "/listcv - List your CVs\n\n"
         "<b>RSS Feed</b>\n"
-        "/setrss - Set RSS feed URL\n"
+        "/setrss &lt;url&gt; - Set RSS feed URL\n"
         "/delrss - Remove RSS feed\n"
         "/scanrss - Scan RSS feed now\n\n"
         "<b>URL Monitoring</b>\n"
-        "/monitor - Add URL to monitor\n"
+        "/monitor &lt;url&gt; &lt;label&gt; - Add URL to monitor\n"
         "/listmonitor - List monitored URLs\n"
-        "/delmonitor - Remove monitored URL\n\n"
+        "/delmonitor &lt;id&gt; - Remove monitored URL\n"
+        "/scanmonitor - Scan all monitored URLs now\n\n"
         "<b>Analysis</b>\n"
-        "/scan - Manual job analysis\n"
+        "/scan &lt;label&gt; - Manual job analysis (send text next)\n"
         "/report - 24h summary\n"
         "/status - System status\n\n"
         "<b>Upload CV via File</b>\n"
@@ -627,6 +628,20 @@ async def cmd_delmonitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 @authorized_only
+async def cmd_scanmonitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Trigger a manual scan of all monitored URLs."""
+    await update.message.reply_text("Starting manual scan of all monitored URLs. Please wait...")
+    
+    # Import here to avoid circular dependency
+    from main import process_monitored_urls
+    
+    # Run the existing orchestration logic
+    await process_monitored_urls(context.application)
+    
+    await update.message.reply_text("Monitored URL scan completed. Check matches above.")
+
+
+@authorized_only
 async def cmd_listmonitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List all monitored URLs for the user."""
     user_id = update.effective_user.id
@@ -639,7 +654,7 @@ async def cmd_listmonitor(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
     
-    lines = ["<b>Your Monitored URLs</b>\n----------------------------------"]
+    lines = ["<b>Your Monitored URLs</b>\n---------------------------"]
     for url_data in urls:
         url_preview = url_data['url'][:40] + "..." if len(url_data['url']) > 40 else url_data['url']
         lines.append(
@@ -671,6 +686,7 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("scanrss", cmd_scanrss))
     app.add_handler(CommandHandler("monitor", cmd_monitor))
+    app.add_handler(CommandHandler("scanmonitor", cmd_scanmonitor))
     app.add_handler(CommandHandler("delmonitor", cmd_delmonitor))
     app.add_handler(CommandHandler("listmonitor", cmd_listmonitor))
     

@@ -115,6 +115,7 @@ async def process_monitored_urls(bot_app) -> None:
     """
     Process all monitored URLs from all users.
     Scrapes job listings, analyzes new jobs, and sends notifications.
+    Note: URLs are processed sequentially to avoid overhead and bot detection.
     """
     logger.info("=== Starting monitored URL scan ===")
     
