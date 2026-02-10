@@ -324,13 +324,15 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     text = (
         f"<b>ANALYSIS REPORT</b>\n\n"
-        f"LABEL : <code>{label}</code>\n"
-        f"SCORE : <code>{score}/100</code>\n"
-        f"MODEL : <code>{model_short}</code>\n\n"
-        f"<b>KEY STRENGTHS</b>\n"
+        f"<pre>"
+        f"LABEL : {label}\n"
+        f"SCORE : {score}/100\n"
+        f"MODEL : {model_short}\n\n"
+        f"KEY STRENGTHS\n"
         f"{strengths_text}\n\n"
-        f"<b>IDENTIFIED GAPS</b>\n"
+        f"IDENTIFIED GAPS\n"
         f"{gaps_text}"
+        f"</pre>"
     )
     
     await update.message.reply_html(text)
@@ -531,13 +533,15 @@ async def send_job_notification(
         f"<b>JOB MATCH FOUND</b>\n\n"
         f"<b>{title}</b>\n"
         f"{company}\n\n"
-        f"LABEL : <code>{best_cv}</code>\n"
-        f"SCORE : <code>{score}/100</code>\n"
-        f"MODEL : <code>{model_short}</code>\n\n"
-        f"<b>KEY STRENGTHS</b>\n"
+        f"<pre>"
+        f"LABEL : {best_cv}\n"
+        f"SCORE : {score}/100\n"
+        f"MODEL : {model_short}\n\n"
+        f"KEY STRENGTHS\n"
         f"{strengths_text}\n\n"
-        f"<b>IDENTIFIED GAPS</b>\n"
+        f"IDENTIFIED GAPS\n"
         f"{gaps_text}"
+        f"</pre>"
     )
     
     # Add apply button
@@ -582,9 +586,11 @@ async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     await update.message.reply_html(
         f"<b>URL Added to Monitoring</b>\n\n"
-        f"ID    : <code>{new_id}</code>\n"
-        f"LABEL : <code>{label}</code>\n"
-        f"URL   : {url[:50]}{'...' if len(url) > 50 else ''}\n\n"
+        f"<pre>"
+        f"ID    : {new_id}\n"
+        f"LABEL : {label}\n"
+        f"URL   : {url[:50]}{'...' if len(url) > 50 else ''}"
+        f"</pre>\n"
         f"This URL will be scanned hourly."
     )
     

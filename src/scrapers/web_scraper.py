@@ -335,16 +335,106 @@ def _parse_linkedin(html: str, base_url: str) -> list[dict]:
 
 
 def _parse_glints(html: str, base_url: str) -> list[dict]:
-    """Parse Glints job listings."""
+    """
+    Parse Glints job listings.
+    Primary: Extract from __NEXT_DATA__ JSON (Next.js SSR data).
+    Fallback: HTML selectors.
+    """
     jobs = []
     soup = BeautifulSoup(html, "lxml")
     
-    # Glints job cards
+    # === Strategy 1: Extract from __NEXT_DATA__ JSON ===
+    next_data_tag = soup.find("script", {"id": "__NEXT_DATA__"})
+    if next_data_tag:
+        try:
+            import json
+            data = json.loads(next_data_tag.string)
+            
+            props = data.get("props", {}).get("pageProps", {})
+            
+            # Try multiple paths for job listings
+            job_list = (
+                props.get("jobs", []) or
+                props.get("data", {}).get("jobs", []) or
+                props.get("initialData", {}).get("jobs", []) or
+                props.get("searchResults", {}).get("data", []) or
+                []
+            )
+            
+            for job_data in job_list:
+                try:
+                    title = (
+                        job_data.get("title") or
+                        job_data.get("name") or
+                        job_data.get("job_title", "")
+                    )
+                    
+                    if not _is_valid_title(title):
+                        continue
+                    
+                    # Company
+                    company_data = job_data.get("company", {})
+                    if isinstance(company_data, dict):
+                        company = company_data.get("name", "Unknown Company")
+                    elif isinstance(company_data, str):
+                        company = company_data
+                    else:
+                        company = job_data.get("companyName", "Unknown Company")
+                    
+                    # Link - prioritize direct URL
+                    link = (
+                        job_data.get("url") or
+                        job_data.get("link") or
+                        ""
+                    )
+                    
+                    if not link:
+                        job_id = job_data.get("id", "")
+                        slug = job_data.get("slug", "")
+                        if slug:
+                            link = f"https://glints.com/id/opportunities/jobs/{slug}"
+                        elif job_id:
+                            link = f"https://glints.com/id/opportunities/jobs/{job_id}"
+                    
+                    if link and not link.startswith("http"):
+                        link = f"https://glints.com{link}"
+                    
+                    if not link:
+                        continue
+                    
+                    logger.debug(f"Glints job: {title} @ {company} -> {link}")
+                    
+                    description = job_data.get("description", "")[:500]
+                    
+                    jobs.append({
+                        "title": title,
+                        "company": company,
+                        "link": link,
+                        "description": description,
+                        "hash": _generate_job_hash(link)
+                    })
+                    
+                except Exception as e:
+                    logger.debug(f"Error parsing Glints JSON job: {e}")
+                    continue
+            
+            if jobs:
+                jobs = _deduplicate_by_link(jobs)
+                logger.info(f"Glints (JSON): Found {len(jobs)} jobs")
+                return jobs
+            else:
+                logger.warning(f"Glints JSON: No jobs found. pageProps keys: {list(props.keys())}")
+                if job_list:
+                    logger.warning(f"Glints JSON: First item keys: {list(job_list[0].keys())}")
+                    
+        except Exception as e:
+            logger.warning(f"Failed to parse Glints __NEXT_DATA__: {e}")
+    
+    # === Strategy 2: Fallback to HTML selectors ===
     job_cards = soup.select("div[data-testid='job-card'], .job-card, .JobCardsc, a[href*='/opportunities/']")
     
     for card in job_cards:
         try:
-            # Title
             title_elem = card.select_one("h2, h3, .job-title, [data-testid='job-title']")
             title = title_elem.get_text(strip=True) if title_elem else None
             
@@ -354,11 +444,15 @@ def _parse_glints(html: str, base_url: str) -> list[dict]:
             if not _is_valid_title(title):
                 continue
             
-            # Company
-            company_elem = card.select_one(".company-name, [data-testid='company-name'], span")
-            company = company_elem.get_text(strip=True) if company_elem else "Unknown Company"
+            company = "Unknown Company"
+            for sel in [".company-name", "[data-testid='company-name']", "span"]:
+                elem = card.select_one(sel)
+                if elem:
+                    text = elem.get_text(strip=True)
+                    if text and text != title and len(text) < 80:
+                        company = text
+                        break
             
-            # Link
             link_elem = card if card.name == "a" else card.select_one("a[href*='/opportunities/']")
             link = link_elem.get("href", "") if link_elem else ""
             
@@ -381,7 +475,7 @@ def _parse_glints(html: str, base_url: str) -> list[dict]:
             continue
     
     jobs = _deduplicate_by_link(jobs)
-    logger.info(f"Glints: Found {len(jobs)} jobs")
+    logger.info(f"Glints (HTML): Found {len(jobs)} jobs")
     return jobs
 
 
