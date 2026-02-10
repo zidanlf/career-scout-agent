@@ -319,20 +319,18 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Extract short model name
     model_short = model_used.split("/")[-1].split(":")[0] if "/" in model_used else model_used
     
-    strengths_text = "\n".join([f"- {s}" for s in strengths]) if strengths else "- None identified"
-    gaps_text = "\n".join([f"- {g}" for g in gaps]) if gaps else "- None identified"
+    strengths_text = "\n".join([f"  - {s}" for s in strengths]) if strengths else "  - None identified"
+    gaps_text = "\n".join([f"  - {g}" for g in gaps]) if gaps else "  - None identified"
     
     text = (
         f"<b>ANALYSIS REPORT</b>\n\n"
-        f"<pre>"
-        f"LABEL : {label}\n"
-        f"SCORE : {score}/100\n"
-        f"MODEL : {model_short}"
-        f"</pre>\n"
+        f"LABEL : <code>{label}</code>\n"
+        f"SCORE : <code>{score}/100</code>\n"
+        f"MODEL : <code>{model_short}</code>\n\n"
         f"<b>KEY STRENGTHS</b>\n"
-        f"<pre>{strengths_text}</pre>\n"
+        f"{strengths_text}\n\n"
         f"<b>IDENTIFIED GAPS</b>\n"
-        f"<pre>{gaps_text}</pre>"
+        f"{gaps_text}"
     )
     
     await update.message.reply_html(text)
@@ -526,22 +524,20 @@ async def send_job_notification(
     title = job.get('title', 'No Title')
     company = job.get('company', 'Unknown Company')
     
-    strengths_text = "\n".join([f"- {s}" for s in strengths]) if strengths else "- None identified"
-    gaps_text = "\n".join([f"- {g}" for g in gaps]) if gaps else "- None identified"
+    strengths_text = "\n".join([f"  - {s}" for s in strengths]) if strengths else "  - None identified"
+    gaps_text = "\n".join([f"  - {g}" for g in gaps]) if gaps else "  - None identified"
     
     text = (
         f"<b>JOB MATCH FOUND</b>\n\n"
         f"<b>{title}</b>\n"
         f"{company}\n\n"
-        f"<pre>"
-        f"LABEL : {best_cv}\n"
-        f"SCORE : {score}/100\n"
-        f"MODEL : {model_short}"
-        f"</pre>\n"
+        f"LABEL : <code>{best_cv}</code>\n"
+        f"SCORE : <code>{score}/100</code>\n"
+        f"MODEL : <code>{model_short}</code>\n\n"
         f"<b>KEY STRENGTHS</b>\n"
-        f"<pre>{strengths_text}</pre>\n"
+        f"{strengths_text}\n\n"
         f"<b>IDENTIFIED GAPS</b>\n"
-        f"<pre>{gaps_text}</pre>"
+        f"{gaps_text}"
     )
     
     # Add apply button
@@ -586,11 +582,9 @@ async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     await update.message.reply_html(
         f"<b>URL Added to Monitoring</b>\n\n"
-        f"<pre>"
-        f"ID    : {new_id}\n"
-        f"LABEL : {label}\n"
-        f"URL   : {url[:50]}{'...' if len(url) > 50 else ''}"
-        f"</pre>\n"
+        f"ID    : <code>{new_id}</code>\n"
+        f"LABEL : <code>{label}</code>\n"
+        f"URL   : {url[:50]}{'...' if len(url) > 50 else ''}\n\n"
         f"This URL will be scanned hourly."
     )
     

@@ -155,21 +155,44 @@ def _parse_kalibrr(html: str, base_url: str) -> list[dict]:
                     else:
                         company = job_data.get("company_name", "Unknown Company")
                     
-                    # Build link
-                    slug = job_data.get("slug") or job_data.get("id", "")
-                    company_slug = ""
-                    if isinstance(company_data, dict):
-                        company_slug = company_data.get("code", "") or company_data.get("slug", "")
+                    # Build link - prioritize direct URL from JSON
+                    link = (
+                        job_data.get("url") or
+                        job_data.get("link") or
+                        job_data.get("apply_url") or
+                        ""
+                    )
                     
-                    if company_slug and slug:
-                        link = f"https://www.kalibrr.com/c/{company_slug}/jobs/{slug}"
-                    elif slug:
-                        link = f"https://www.kalibrr.com/c/jobs/{slug}"
-                    else:
-                        link = job_data.get("url", job_data.get("link", ""))
+                    # If no direct link, construct from id/slug
+                    if not link:
+                        job_id = job_data.get("id", "")
+                        slug = job_data.get("slug", "")
+                        company_slug = ""
+                        if isinstance(company_data, dict):
+                            company_slug = (
+                                company_data.get("code") or
+                                company_data.get("slug") or
+                                company_data.get("company_code") or
+                                ""
+                            )
+                        
+                        # Kalibrr URL format: /c/{company_code}/jobs/{job_id}/{slug}
+                        if company_slug and job_id:
+                            link = f"https://www.kalibrr.com/c/{company_slug}/jobs/{job_id}"
+                            if slug:
+                                link += f"/{slug}"
+                        elif job_id:
+                            link = f"https://www.kalibrr.com/c/jobs/{job_id}"
+                    
+                    # Ensure full URL
+                    if link and not link.startswith("http"):
+                        link = f"https://www.kalibrr.com{link}"
                     
                     if not link:
                         continue
+                    
+                    # Log for debugging
+                    logger.debug(f"Kalibrr job: {title} @ {company} -> {link}")
                     
                     description = job_data.get("description", "")[:500]
                     
@@ -189,6 +212,11 @@ def _parse_kalibrr(html: str, base_url: str) -> list[dict]:
                 jobs = _deduplicate_by_link(jobs)
                 logger.info(f"Kalibrr (JSON): Found {len(jobs)} jobs")
                 return jobs
+            else:
+                # Log the JSON keys for debugging
+                logger.warning(f"Kalibrr JSON: No jobs found. pageProps keys: {list(props.keys())}")
+                if job_list:
+                    logger.warning(f"Kalibrr JSON: First item keys: {list(job_list[0].keys())}")
                 
         except Exception as e:
             logger.warning(f"Failed to parse Kalibrr __NEXT_DATA__: {e}")

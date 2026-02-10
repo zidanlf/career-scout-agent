@@ -223,22 +223,20 @@ async def send_scheduled_notification(
         title = job.get('title', 'No Title')
         company = job.get('company', 'Unknown Company')
         
-        strengths_text = "\n".join([f"- {s}" for s in strengths]) if strengths else "- None identified"
-        gaps_text = "\n".join([f"- {g}" for g in gaps]) if gaps else "- None identified"
+        strengths_text = "\n".join([f"  - {s}" for s in strengths]) if strengths else "  - None identified"
+        gaps_text = "\n".join([f"  - {g}" for g in gaps]) if gaps else "  - None identified"
         
         text = (
             f"<b>JOB MATCH FOUND</b>\n\n"
             f"<b>{title}</b>\n"
             f"{company}\n\n"
-            f"<pre>"
-            f"LABEL : {best_cv}\n"
-            f"SCORE : {score}/100\n"
-            f"MODEL : {model_short}"
-            f"</pre>\n"
+            f"LABEL : <code>{best_cv}</code>\n"
+            f"SCORE : <code>{score}/100</code>\n"
+            f"MODEL : <code>{model_short}</code>\n\n"
             f"<b>KEY STRENGTHS</b>\n"
-            f"<pre>{strengths_text}</pre>\n"
+            f"{strengths_text}\n\n"
             f"<b>IDENTIFIED GAPS</b>\n"
-            f"<pre>{gaps_text}</pre>\n\n"
+            f"{gaps_text}\n\n"
             f"<a href=\"{job.get('link', '#')}\">Apply Here</a>"
         )
         
