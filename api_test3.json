@@ -1,0 +1,38 @@
+{
+  "kalibrr_id_api": {
+    "status": 200,
+    "ct": "application/json",
+    "len": 20513,
+    "keys": [
+      "correction_text_search",
+      "count",
+      "from_alternative",
+      "from_correction",
+      "jobs",
+      "search_text"
+    ],
+    "job_count": 3,
+    "first_job_name": "Team Leader Cybersecurity"
+  },
+  "kalibrr_com_api": {
+    "status": 200,
+    "ct": "application/json",
+    "len": 20513,
+    "keys": [
+      "correction_text_search",
+      "count",
+      "from_alternative",
+      "from_correction",
+      "jobs",
+      "search_text"
+    ],
+    "job_count": 3,
+    "first_job_name": "Team Leader Cybersecurity"
+  },
+  "linkedin_html": {
+    "status": 200,
+    "ct": "text/html; charset=utf-8",
+    "len": 245730,
+    "body_start": "<!DOCTYPE html>                                                                                    <html lang=\"en\">     "
+  }
+}
