@@ -108,20 +108,99 @@ def _deduplicate_by_link(jobs: list[dict]) -> list[dict]:
 
 
 def _parse_kalibrr(html: str, base_url: str) -> list[dict]:
-    """Parse Kalibrr job listings."""
+    """
+    Parse Kalibrr job listings.
+    Primary: Extract from __NEXT_DATA__ JSON (Next.js SSR data).
+    Fallback: HTML selectors.
+    """
     jobs = []
     soup = BeautifulSoup(html, "lxml")
     
-    # Kalibrr job cards
+    # === Strategy 1: Extract from __NEXT_DATA__ JSON ===
+    next_data_tag = soup.find("script", {"id": "__NEXT_DATA__"})
+    if next_data_tag:
+        try:
+            import json
+            data = json.loads(next_data_tag.string)
+            
+            # Navigate the Next.js data structure
+            props = data.get("props", {}).get("pageProps", {})
+            
+            # Try multiple possible paths for job listings
+            job_list = (
+                props.get("jobs", []) or
+                props.get("initialJobs", []) or
+                props.get("data", {}).get("jobs", []) or
+                props.get("searchResults", {}).get("jobs", []) or
+                []
+            )
+            
+            for job_data in job_list:
+                try:
+                    title = (
+                        job_data.get("name") or 
+                        job_data.get("title") or 
+                        job_data.get("job_title", "")
+                    )
+                    
+                    if not _is_valid_title(title):
+                        continue
+                    
+                    # Company can be nested
+                    company_data = job_data.get("company", {})
+                    if isinstance(company_data, dict):
+                        company = company_data.get("name", "Unknown Company")
+                    elif isinstance(company_data, str):
+                        company = company_data
+                    else:
+                        company = job_data.get("company_name", "Unknown Company")
+                    
+                    # Build link
+                    slug = job_data.get("slug") or job_data.get("id", "")
+                    company_slug = ""
+                    if isinstance(company_data, dict):
+                        company_slug = company_data.get("code", "") or company_data.get("slug", "")
+                    
+                    if company_slug and slug:
+                        link = f"https://www.kalibrr.com/c/{company_slug}/jobs/{slug}"
+                    elif slug:
+                        link = f"https://www.kalibrr.com/c/jobs/{slug}"
+                    else:
+                        link = job_data.get("url", job_data.get("link", ""))
+                    
+                    if not link:
+                        continue
+                    
+                    description = job_data.get("description", "")[:500]
+                    
+                    jobs.append({
+                        "title": title,
+                        "company": company,
+                        "link": link,
+                        "description": description,
+                        "hash": _generate_job_hash(link)
+                    })
+                    
+                except Exception as e:
+                    logger.debug(f"Error parsing Kalibrr JSON job: {e}")
+                    continue
+            
+            if jobs:
+                jobs = _deduplicate_by_link(jobs)
+                logger.info(f"Kalibrr (JSON): Found {len(jobs)} jobs")
+                return jobs
+                
+        except Exception as e:
+            logger.warning(f"Failed to parse Kalibrr __NEXT_DATA__: {e}")
+    
+    # === Strategy 2: Fallback to HTML selectors ===
     job_cards = soup.select("div[data-testid='job-card'], .k-job-card, article.job-card")
     
-    # Fallback: look for links containing job details
     if not job_cards:
         job_cards = soup.select("a[href*='/c/'][href*='/jobs/']")
     
     for card in job_cards:
         try:
-            # Title
             title_elem = card.select_one("h2, h3, .job-title, [data-testid='job-title']")
             title = title_elem.get_text(strip=True) if title_elem else None
             
@@ -131,11 +210,16 @@ def _parse_kalibrr(html: str, base_url: str) -> list[dict]:
             if not _is_valid_title(title):
                 continue
             
-            # Company
-            company_elem = card.select_one(".company-name, [data-testid='company-name'], span.k-text-gray-darker")
-            company = company_elem.get_text(strip=True) if company_elem else "Unknown Company"
+            # Try multiple selectors for company
+            company = "Unknown Company"
+            for sel in [".company-name", "[data-testid='company-name']", "span.k-text-gray-darker", "h4", "span"]:
+                elem = card.select_one(sel)
+                if elem:
+                    text = elem.get_text(strip=True)
+                    if text and text != title and len(text) < 80:
+                        company = text
+                        break
             
-            # Link
             link_elem = card if card.name == "a" else card.select_one("a[href*='/jobs/']")
             link = link_elem.get("href", "") if link_elem else ""
             
@@ -145,7 +229,6 @@ def _parse_kalibrr(html: str, base_url: str) -> list[dict]:
             if not link:
                 continue
             
-            # Description
             desc_elem = card.select_one(".job-description, p")
             description = desc_elem.get_text(strip=True)[:500] if desc_elem else ""
             
@@ -162,7 +245,7 @@ def _parse_kalibrr(html: str, base_url: str) -> list[dict]:
             continue
     
     jobs = _deduplicate_by_link(jobs)
-    logger.info(f"Kalibrr: Found {len(jobs)} jobs")
+    logger.info(f"Kalibrr (HTML): Found {len(jobs)} jobs")
     return jobs
 
 

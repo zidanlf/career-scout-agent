@@ -330,9 +330,9 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"MODEL : {model_short}"
         f"</pre>\n"
         f"<b>KEY STRENGTHS</b>\n"
-        f"{strengths_text}\n\n"
+        f"<pre>{strengths_text}</pre>\n"
         f"<b>IDENTIFIED GAPS</b>\n"
-        f"{gaps_text}"
+        f"<pre>{gaps_text}</pre>"
     )
     
     await update.message.reply_html(text)
@@ -539,9 +539,9 @@ async def send_job_notification(
         f"MODEL : {model_short}"
         f"</pre>\n"
         f"<b>KEY STRENGTHS</b>\n"
-        f"{strengths_text}\n\n"
+        f"<pre>{strengths_text}</pre>\n"
         f"<b>IDENTIFIED GAPS</b>\n"
-        f"{gaps_text}"
+        f"<pre>{gaps_text}</pre>"
     )
     
     # Add apply button

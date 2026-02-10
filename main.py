@@ -236,9 +236,9 @@ async def send_scheduled_notification(
             f"MODEL : {model_short}"
             f"</pre>\n"
             f"<b>KEY STRENGTHS</b>\n"
-            f"{strengths_text}\n\n"
+            f"<pre>{strengths_text}</pre>\n"
             f"<b>IDENTIFIED GAPS</b>\n"
-            f"{gaps_text}\n\n"
+            f"<pre>{gaps_text}</pre>\n\n"
             f"<a href=\"{job.get('link', '#')}\">Apply Here</a>"
         )
         
