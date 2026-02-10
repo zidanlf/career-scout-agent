@@ -100,6 +100,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/scanmonitor - Scan all monitored URLs now\n\n"
         "<b>Analysis</b>\n"
         "/scan &lt;label&gt; &lt;text&gt; - Manual job analysis\n"
+        "/next - Check next scan schedule\n"
         "/report - 24h summary\n"
         "/status - System status\n\n"
         "<b>Upload CV via File</b>\n"
@@ -201,17 +202,27 @@ async def cmd_delrss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 @authorized_only
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show system status and user info."""
-    user_data = await get_user_data(update.effective_user.id)
+    user_id = update.effective_user.id
+    user_data = await get_user_data(user_id)
     db_stats = await get_db_stats()
     
     rss_status = "Configured" if user_data and user_data.get("rss_url") else "Not configured"
     cv_count = len(user_data.get("cvs", {})) if user_data else 0
+    
+    # Get schedule info from main.SCAN_STATE
+    from main import SCAN_STATE
+    last_run = SCAN_STATE.get("last_run_time", "Never")
+    next_run = SCAN_STATE.get("next_run_time", "Calculating...")
+    next_user = SCAN_STATE.get("next_user", "Unknown")
     
     await update.message.reply_text(
         "*System Status*\n\n"
         "*Your Profile:*\n"
         f"- RSS Feed: {rss_status}\n"
         f"- CVs Stored: {cv_count}\n\n"
+        "*Schedule:*\n"
+        f"- Last Run: {last_run}\n"
+        f"- Next Run: {next_run} ({next_user}'s RSS)\n\n"
         "*Database Statistics:*\n"
         f"- Users: {db_stats.get('users', 0)}\n"
         f"- CV Slots: {db_stats.get('cv_slots', 0)}\n"
@@ -401,6 +412,49 @@ async def cmd_scanrss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"- Analyzed: {len(jobs)} jobs\n"
         f"- Matches sent: {matches_sent}"
     )
+
+
+@authorized_only
+async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the next scan schedule info."""
+    from main import SCAN_STATE
+    
+    last_run = SCAN_STATE.get("last_run_time")
+    next_run = SCAN_STATE.get("next_run_time")
+    next_user = SCAN_STATE.get("next_user")
+    
+    if not next_run:
+        # If bot just started and haven't run yet, calculate estimated
+        now = datetime.now()
+        next_hour = now.hour + 1
+        target_user = "PARTNER" if next_hour % 2 != 0 else "ZIDAN"
+        next_run = f"{next_hour:02d}:00"
+        next_user = target_user
+
+    # Calculate countdown
+    now = datetime.now()
+    try:
+        next_hour_val = int(next_run.split(":")[0])
+        # Simple countdown logic for same-day
+        minutes_left = (next_hour_val * 60) - (now.hour * 60 + now.minute)
+        # If negative, it's for tomorrow or just now (ignore complexity for now)
+        if minutes_left < 0: minutes_left += 24 * 60 
+        
+        countdown = f"{minutes_left // 60}h {minutes_left % 60}m"
+    except:
+        countdown = "Calculating..."
+
+    text = (
+        "<b>NEXT SCAN SCHEDULE</b>\n"
+        "---------------------------\n"
+        f"<b>Last Run:</b>  {last_run or 'None'}\n"
+        f"<b>Next Run:</b>  {next_run}\n"
+        f"<b>Target:</b>    {next_user}'s RSS Feed\n"
+        f"<b>Remaining:</b> {countdown}\n\n"
+        "<i>Note: Monitored URLs are scanned every hour regardless of the RSS target.</i>"
+    )
+    
+    await update.message.reply_html(text)
 
 
 # ============== STATEFUL DOCUMENT HANDLER (CV via .txt file) ==============
@@ -685,6 +739,7 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("scanrss", cmd_scanrss))
+    app.add_handler(CommandHandler("next", cmd_next))
     app.add_handler(CommandHandler("monitor", cmd_monitor))
     app.add_handler(CommandHandler("scanmonitor", cmd_scanmonitor))
     app.add_handler(CommandHandler("delmonitor", cmd_delmonitor))

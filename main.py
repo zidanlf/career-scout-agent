@@ -50,6 +50,13 @@ logger = logging.getLogger("main")
 # User IDs from environment
 ZIDAN_ID = int(os.getenv("ZIDAN_ID", "0"))
 PARTNER_ID = int(os.getenv("PARTNER_ID", "0"))
+ 
+# Global state for scheduling information
+SCAN_STATE = {
+    "next_run_time": None,
+    "next_user": "Unknown",
+    "last_run_time": None
+}
 
 
 async def process_user_jobs(user_id: int, bot_app) -> None:
@@ -284,6 +291,15 @@ async def scheduled_scan(bot_app) -> None:
             
             # === Monitored URL Scan (All Users) ===
             await process_monitored_urls(bot_app)
+            
+            # === Update Next Scan Info ===
+            now = datetime.now()
+            next_time = now.hour + 1
+            next_user_name = "PARTNER" if next_time % 2 != 0 else "ZIDAN"
+            
+            SCAN_STATE["last_run_time"] = now.strftime("%H:%M:%S")
+            SCAN_STATE["next_run_time"] = f"{next_time:02d}:00"
+            SCAN_STATE["next_user"] = next_user_name
             
         except Exception as e:
             logger.error(f"Scheduled scan error: {e}")
