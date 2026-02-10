@@ -99,7 +99,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/delmonitor &lt;id&gt; - Remove monitored URL\n"
         "/scanmonitor - Scan all monitored URLs now\n\n"
         "<b>Analysis</b>\n"
-        "/scan &lt;label&gt; - Manual job analysis (send text next)\n"
+        "/scan &lt;label&gt; &lt;text&gt; - Manual job analysis\n"
         "/report - 24h summary\n"
         "/status - System status\n\n"
         "<b>Upload CV via File</b>\n"
