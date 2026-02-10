@@ -445,13 +445,12 @@ async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         countdown = "Calculating..."
 
     text = (
-        "<b>NEXT SCAN SCHEDULE</b>\n"
-        "---------------------------\n"
+        "<b>NEXT SCAN SCHEDULE</b>\n\n"
         f"<b>Last Run:</b>  {last_run or 'None'}\n"
         f"<b>Next Run:</b>  {next_run}\n"
-        f"<b>Target:</b>    {next_user}'s RSS Feed\n"
+        f"<b>Target:</b>    {next_user}\n"
         f"<b>Remaining:</b> {countdown}\n\n"
-        "<i>Note: Monitored URLs are scanned every hour regardless of the RSS target.</i>"
+        "<i>Note: Both RSS Feed and Monitored URLs for the target user will be scanned.</i>"
     )
     
     await update.message.reply_html(text)
@@ -683,14 +682,15 @@ async def cmd_delmonitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 @authorized_only
 async def cmd_scanmonitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Trigger a manual scan of all monitored URLs."""
-    await update.message.reply_text("Starting manual scan of all monitored URLs. Please wait...")
+    """Trigger a manual scan of your monitored URLs."""
+    user_id = update.effective_user.id
+    await update.message.reply_text("Starting manual scan of your monitored URLs. Please wait...")
     
     # Import here to avoid circular dependency
     from main import process_monitored_urls
     
-    # Run the existing orchestration logic
-    await process_monitored_urls(context.application)
+    # Run the orchestration for ONLY this user
+    await process_monitored_urls(context.application, user_id=user_id)
     
     await update.message.reply_text("Monitored URL scan completed. Check matches above.")
 

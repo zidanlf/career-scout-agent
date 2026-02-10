@@ -118,16 +118,22 @@ async def process_user_jobs(user_id: int, bot_app) -> None:
             await log_processed_job(job["hash"], user_id, 0, "ERROR")
 
 
-async def process_monitored_urls(bot_app) -> None:
+async def process_monitored_urls(bot_app, user_id: int = None) -> None:
     """
-    Process all monitored URLs from all users.
-    Scrapes job listings, analyzes new jobs, and sends notifications.
+    Process monitored URLs. 
+    If user_id is provided, only process URLs for that user.
+    Otherwise, process all monitored URLs.
     Note: URLs are processed sequentially to avoid overhead and bot detection.
     """
-    logger.info("=== Starting monitored URL scan ===")
+    logger.info(f"=== Starting monitored URL scan {'for user ' + str(user_id) if user_id else '(All Users)'} ===")
     
-    # Get all monitored URLs
-    monitored_urls = await get_all_monitored_urls()
+    # Get monitored URLs
+    from src.database.db_manager import get_monitored_urls
+    
+    if user_id:
+        monitored_urls = await get_monitored_urls(user_id)
+    else:
+        monitored_urls = await get_all_monitored_urls()
     
     if not monitored_urls:
         logger.info("No monitored URLs to process")
@@ -289,8 +295,12 @@ async def scheduled_scan(bot_app) -> None:
                 await process_user_jobs(target_user, bot_app)
                 logger.info(f"=== RSS scan completed for {user_name} ===")
             
-            # === Monitored URL Scan (All Users) ===
-            await process_monitored_urls(bot_app)
+            # === Monitored URL Scan (Unified with RSS Rotation) ===
+            # Only scan links for the user whose turn it is
+            if target_user != 0:
+                logger.info(f"=== Unified scan (RSS + URLs) starting for {user_name} ===")
+                await process_monitored_urls(bot_app, target_user)
+                logger.info(f"=== Unified scan completed for {user_name} ===")
             
             # === Update Next Scan Info ===
             now = datetime.now()
