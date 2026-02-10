@@ -1,7 +1,7 @@
 """
 Web Scraper for Career Scout Agent
 Scrapes job listings from job search result pages.
-Supports Kalibrr, LinkedIn, and Glints.
+Supports Kalibrr, LinkedIn, Glints, and Dealls.
 """
 
 import hashlib
@@ -25,11 +25,31 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
+# Titles to reject (button text, nav items, etc.)
+INVALID_TITLES = {
+    "view post", "view job", "apply now", "apply", "see more",
+    "learn more", "sign in", "log in", "register", "view all",
+    "load more", "show more", "see all jobs", "next", "previous",
+}
 
-def _generate_job_hash(title: str, company: str, link: str) -> str:
-    """Generate unique hash for a job listing."""
-    content = f"{title}|{company}|{link}"
-    return hashlib.md5(content.encode()).hexdigest()
+
+def _generate_job_hash(link: str) -> str:
+    """Generate unique hash based on link only to prevent duplicates."""
+    # Normalize link: strip tracking params and trailing slashes
+    clean_link = link.split("?")[0].rstrip("/").lower()
+    return hashlib.md5(clean_link.encode()).hexdigest()
+
+
+def _is_valid_title(title: str) -> bool:
+    """Check if a title is a real job title (not button text or noise)."""
+    if not title or len(title) < 3:
+        return False
+    if title.lower().strip() in INVALID_TITLES:
+        return False
+    # Reject very short generic text
+    if len(title) < 5 and not any(c.isupper() for c in title):
+        return False
+    return True
 
 
 def _detect_platform(url: str) -> str:
@@ -42,6 +62,8 @@ def _detect_platform(url: str) -> str:
         return "linkedin"
     elif "glints" in domain:
         return "glints"
+    elif "dealls" in domain:
+        return "dealls"
     else:
         return "unknown"
 
@@ -64,12 +86,33 @@ async def _fetch_page(url: str, timeout: float = 30.0) -> Optional[str]:
         return None
 
 
+def _deduplicate_by_link(jobs: list[dict]) -> list[dict]:
+    """
+    Remove duplicate jobs based on link.
+    Keeps the entry with the longest/best title.
+    """
+    link_map: dict[str, dict] = {}
+    
+    for job in jobs:
+        clean_link = job["link"].split("?")[0].rstrip("/").lower()
+        
+        if clean_link in link_map:
+            existing = link_map[clean_link]
+            # Keep whichever has the longer (more descriptive) title
+            if len(job["title"]) > len(existing["title"]):
+                link_map[clean_link] = job
+        else:
+            link_map[clean_link] = job
+    
+    return list(link_map.values())
+
+
 def _parse_kalibrr(html: str, base_url: str) -> list[dict]:
     """Parse Kalibrr job listings."""
     jobs = []
     soup = BeautifulSoup(html, "lxml")
     
-    # Kalibrr job cards are in article elements or divs with specific classes
+    # Kalibrr job cards
     job_cards = soup.select("div[data-testid='job-card'], .k-job-card, article.job-card")
     
     # Fallback: look for links containing job details
@@ -78,22 +121,21 @@ def _parse_kalibrr(html: str, base_url: str) -> list[dict]:
     
     for card in job_cards:
         try:
-            # Try to extract title
+            # Title
             title_elem = card.select_one("h2, h3, .job-title, [data-testid='job-title']")
             title = title_elem.get_text(strip=True) if title_elem else None
             
-            # If card is a link itself
             if card.name == "a" and not title:
                 title = card.get_text(strip=True)[:100]
             
-            if not title:
+            if not _is_valid_title(title):
                 continue
             
-            # Extract company
+            # Company
             company_elem = card.select_one(".company-name, [data-testid='company-name'], span.k-text-gray-darker")
             company = company_elem.get_text(strip=True) if company_elem else "Unknown Company"
             
-            # Extract link
+            # Link
             link_elem = card if card.name == "a" else card.select_one("a[href*='/jobs/']")
             link = link_elem.get("href", "") if link_elem else ""
             
@@ -103,7 +145,7 @@ def _parse_kalibrr(html: str, base_url: str) -> list[dict]:
             if not link:
                 continue
             
-            # Extract description if available
+            # Description
             desc_elem = card.select_one(".job-description, p")
             description = desc_elem.get_text(strip=True)[:500] if desc_elem else ""
             
@@ -112,13 +154,14 @@ def _parse_kalibrr(html: str, base_url: str) -> list[dict]:
                 "company": company,
                 "link": link,
                 "description": description,
-                "hash": _generate_job_hash(title, company, link)
+                "hash": _generate_job_hash(link)
             })
             
         except Exception as e:
             logger.debug(f"Error parsing Kalibrr card: {e}")
             continue
     
+    jobs = _deduplicate_by_link(jobs)
     logger.info(f"Kalibrr: Found {len(jobs)} jobs")
     return jobs
 
@@ -133,15 +176,23 @@ def _parse_linkedin(html: str, base_url: str) -> list[dict]:
     
     for card in job_cards:
         try:
-            # Title
-            title_elem = card.select_one("h3, .base-search-card__title, .job-card-list__title")
+            # Title - be specific to avoid picking up "View Post"
+            title_elem = card.select_one(
+                ".base-search-card__title, "
+                ".job-card-list__title, "
+                "h3.base-search-card__title"
+            )
             title = title_elem.get_text(strip=True) if title_elem else None
             
-            if not title:
+            if not _is_valid_title(title):
                 continue
             
             # Company
-            company_elem = card.select_one("h4, .base-search-card__subtitle, .job-card-container__company-name")
+            company_elem = card.select_one(
+                ".base-search-card__subtitle, "
+                ".job-card-container__company-name, "
+                "h4.base-search-card__subtitle"
+            )
             company = company_elem.get_text(strip=True) if company_elem else "Unknown Company"
             
             # Link
@@ -151,7 +202,7 @@ def _parse_linkedin(html: str, base_url: str) -> list[dict]:
             if not link:
                 continue
             
-            # Clean LinkedIn tracking params
+            # Clean tracking params
             if "?" in link:
                 link = link.split("?")[0]
             
@@ -160,13 +211,14 @@ def _parse_linkedin(html: str, base_url: str) -> list[dict]:
                 "company": company,
                 "link": link,
                 "description": "",
-                "hash": _generate_job_hash(title, company, link)
+                "hash": _generate_job_hash(link)
             })
             
         except Exception as e:
             logger.debug(f"Error parsing LinkedIn card: {e}")
             continue
     
+    jobs = _deduplicate_by_link(jobs)
     logger.info(f"LinkedIn: Found {len(jobs)} jobs")
     return jobs
 
@@ -185,11 +237,10 @@ def _parse_glints(html: str, base_url: str) -> list[dict]:
             title_elem = card.select_one("h2, h3, .job-title, [data-testid='job-title']")
             title = title_elem.get_text(strip=True) if title_elem else None
             
-            # If card is a link
             if card.name == "a" and not title:
                 title = card.get_text(strip=True)[:100]
             
-            if not title:
+            if not _is_valid_title(title):
                 continue
             
             # Company
@@ -211,14 +262,91 @@ def _parse_glints(html: str, base_url: str) -> list[dict]:
                 "company": company,
                 "link": link,
                 "description": "",
-                "hash": _generate_job_hash(title, company, link)
+                "hash": _generate_job_hash(link)
             })
             
         except Exception as e:
             logger.debug(f"Error parsing Glints card: {e}")
             continue
     
+    jobs = _deduplicate_by_link(jobs)
     logger.info(f"Glints: Found {len(jobs)} jobs")
+    return jobs
+
+
+def _parse_dealls(html: str, base_url: str) -> list[dict]:
+    """Parse Dealls (dealls.com) job listings."""
+    jobs = []
+    soup = BeautifulSoup(html, "lxml")
+    
+    # Dealls job cards - try multiple selectors
+    job_cards = soup.select(
+        "a[href*='/job/'], "
+        "a[href*='/jobs/'], "
+        "div[class*='JobCard'], "
+        "div[class*='job-card'], "
+        "div[class*='jobCard']"
+    )
+    
+    for card in job_cards:
+        try:
+            # Title
+            title_elem = card.select_one("h2, h3, h4, [class*='title'], [class*='Title']")
+            title = title_elem.get_text(strip=True) if title_elem else None
+            
+            # If card is a link itself, get text
+            if card.name == "a" and not title:
+                # Try to get the first meaningful text
+                for elem in card.find_all(["h2", "h3", "h4", "span", "p"]):
+                    text = elem.get_text(strip=True)
+                    if _is_valid_title(text) and len(text) > 5:
+                        title = text
+                        break
+            
+            if not _is_valid_title(title):
+                continue
+            
+            # Company
+            company = "Unknown Company"
+            company_selectors = [
+                "[class*='company']", "[class*='Company']",
+                "p", "span"
+            ]
+            for sel in company_selectors:
+                elem = card.select_one(sel)
+                if elem:
+                    text = elem.get_text(strip=True)
+                    if text and text != title and len(text) < 80 and _is_valid_title(text):
+                        company = text
+                        break
+            
+            # Link
+            if card.name == "a":
+                link = card.get("href", "")
+            else:
+                link_elem = card.select_one("a[href*='/job']")
+                link = link_elem.get("href", "") if link_elem else ""
+            
+            if link and not link.startswith("http"):
+                link = f"https://dealls.com{link}"
+            
+            if not link:
+                continue
+            
+            jobs.append({
+                "title": title,
+                "company": company,
+                "link": link,
+                "description": "",
+                "hash": _generate_job_hash(link)
+            })
+            
+        except Exception as e:
+            logger.debug(f"Error parsing Dealls card: {e}")
+            continue
+    
+    jobs = _deduplicate_by_link(jobs)
+    logger.info(f"Dealls: Found {len(jobs)} jobs")
     return jobs
 
 
@@ -232,14 +360,14 @@ def _parse_generic(html: str, base_url: str) -> list[dict]:
     
     for card in potential_cards:
         try:
-            # Find title (usually in h2/h3)
+            # Title
             title_elem = card.select_one("h2, h3, h4")
             title = title_elem.get_text(strip=True) if title_elem else None
             
-            if not title or len(title) < 5:
+            if not _is_valid_title(title):
                 continue
             
-            # Find link
+            # Link
             link_elem = card.select_one("a")
             link = link_elem.get("href", "") if link_elem else ""
             
@@ -250,7 +378,7 @@ def _parse_generic(html: str, base_url: str) -> list[dict]:
                 parsed = urlparse(base_url)
                 link = f"{parsed.scheme}://{parsed.netloc}{link}"
             
-            # Company (try various selectors)
+            # Company
             company = "Unknown Company"
             for selector in [".company", ".employer", "span", "p"]:
                 elem = card.select_one(selector)
@@ -265,13 +393,14 @@ def _parse_generic(html: str, base_url: str) -> list[dict]:
                 "company": company,
                 "link": link,
                 "description": "",
-                "hash": _generate_job_hash(title, company, link)
+                "hash": _generate_job_hash(link)
             })
             
         except Exception as e:
             logger.debug(f"Error parsing generic card: {e}")
             continue
     
+    jobs = _deduplicate_by_link(jobs)
     logger.info(f"Generic parser: Found {len(jobs)} jobs")
     return jobs
 
@@ -281,7 +410,7 @@ async def scrape_job_listings(url: str) -> list[dict]:
     Scrape job listings from a search results page.
     
     Args:
-        url: Job search results URL (Kalibrr, LinkedIn, Glints, or other)
+        url: Job search results URL (Kalibrr, LinkedIn, Glints, Dealls, or other)
     
     Returns:
         List of job dicts: {title, company, link, description, hash}
@@ -303,6 +432,8 @@ async def scrape_job_listings(url: str) -> list[dict]:
         jobs = _parse_linkedin(html, url)
     elif platform == "glints":
         jobs = _parse_glints(html, url)
+    elif platform == "dealls":
+        jobs = _parse_dealls(html, url)
     else:
         logger.warning(f"Unknown platform, using generic parser for: {url}")
         jobs = _parse_generic(html, url)

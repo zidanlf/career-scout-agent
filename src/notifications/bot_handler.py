@@ -82,22 +82,27 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     await upsert_user(user.id, user.full_name)
     
-    await update.message.reply_text(
-        f"*Welcome, {user.first_name}!*\n\n"
+    await update.message.reply_html(
+        f"<b>Welcome, {user.first_name}!</b>\n"
         "You have been registered in Career Scout.\n\n"
-        "*Available Commands:*\n"
-        "- `/addcv <label> <text>` - Add a CV via text\n"
-        "- `/delcv <label>` - Delete a CV\n"
-        "- `/listcv` - List your CVs\n"
-        "- `/setrss <url>` - Set RSS feed\n"
-        "- `/delrss` - Remove RSS feed\n"
-        "- `/scan <label> <job_text>` - Manual job analysis\n"
-        "- `/scanrss` - Scan RSS feed for jobs\n"
-        "- `/report` - 24h summary\n"
-        "- `/status` - System status\n\n"
-        "*Upload CV via File:*\n"
-        "Send a .txt file, then provide the label when prompted.",
-        parse_mode="Markdown"
+        "<b>CV Management</b>\n"
+        "/addcv - Add CV via text\n"
+        "/delcv - Delete a CV\n"
+        "/listcv - List your CVs\n\n"
+        "<b>RSS Feed</b>\n"
+        "/setrss - Set RSS feed URL\n"
+        "/delrss - Remove RSS feed\n"
+        "/scanrss - Scan RSS feed now\n\n"
+        "<b>URL Monitoring</b>\n"
+        "/monitor - Add URL to monitor\n"
+        "/listmonitor - List monitored URLs\n"
+        "/delmonitor - Remove monitored URL\n\n"
+        "<b>Analysis</b>\n"
+        "/scan - Manual job analysis\n"
+        "/report - 24h summary\n"
+        "/status - System status\n\n"
+        "<b>Upload CV via File</b>\n"
+        "Send a .txt file, then provide the label."
     )
     logger.info(f"User registered: {user.id} ({user.full_name})")
 
@@ -319,9 +324,11 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     text = (
         f"<b>ANALYSIS REPORT</b>\n\n"
-        f"TARGET LABEL : <code>{label}</code>\n"
-        f"MATCH SCORE  : <code>{score}/100</code>\n"
-        f"AI ENGINE    : <code>{model_short}</code>\n\n"
+        f"<pre>"
+        f"LABEL : {label}\n"
+        f"SCORE : {score}/100\n"
+        f"MODEL : {model_short}"
+        f"</pre>\n"
         f"<b>KEY STRENGTHS</b>\n"
         f"{strengths_text}\n\n"
         f"<b>IDENTIFIED GAPS</b>\n"
@@ -526,9 +533,11 @@ async def send_job_notification(
         f"<b>JOB MATCH FOUND</b>\n\n"
         f"<b>{title}</b>\n"
         f"{company}\n\n"
-        f"TARGET LABEL : <code>{best_cv}</code>\n"
-        f"MATCH SCORE  : <code>{score}/100</code>\n"
-        f"AI ENGINE    : <code>{model_short}</code>\n\n"
+        f"<pre>"
+        f"LABEL : {best_cv}\n"
+        f"SCORE : {score}/100\n"
+        f"MODEL : {model_short}"
+        f"</pre>\n"
         f"<b>KEY STRENGTHS</b>\n"
         f"{strengths_text}\n\n"
         f"<b>IDENTIFIED GAPS</b>\n"
@@ -576,12 +585,13 @@ async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     new_id = await add_monitored_url(user_id, url, label)
     
     await update.message.reply_html(
-        f"<b>URL Added to Monitoring</b>\n"
-        f"----------------------------------\n"
-        f"ID    : <code>{new_id}</code>\n"
-        f"LABEL : <code>{label}</code>\n"
-        f"URL   : {url[:50]}{'...' if len(url) > 50 else ''}\n\n"
-        f"This URL will be scanned hourly for new job listings."
+        f"<b>URL Added to Monitoring</b>\n\n"
+        f"<pre>"
+        f"ID    : {new_id}\n"
+        f"LABEL : {label}\n"
+        f"URL   : {url[:50]}{'...' if len(url) > 50 else ''}"
+        f"</pre>\n"
+        f"This URL will be scanned hourly."
     )
     
     logger.info(f"User {user_id} added monitored URL: id={new_id} label={label}")
