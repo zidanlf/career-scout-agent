@@ -417,7 +417,7 @@ async def cmd_scanrss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 @authorized_only
 async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the next scan schedule info."""
-    from main import SCAN_STATE
+    from main import SCAN_STATE, WIB
     
     last_run = SCAN_STATE.get("last_run_time")
     next_run = SCAN_STATE.get("next_run_time")
@@ -425,14 +425,14 @@ async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     if not next_run:
         # If bot just started and haven't run yet, calculate estimated
-        now = datetime.now()
+        now = datetime.now(WIB)
         next_hour = now.hour + 1
         target_user = "PARTNER" if next_hour % 2 != 0 else "ZIDAN"
         next_run = f"{next_hour:02d}:00"
         next_user = target_user
 
     # Calculate countdown
-    now = datetime.now()
+    now = datetime.now(WIB)
     try:
         next_hour_val = int(next_run.split(":")[0])
         # Simple countdown logic for same-day

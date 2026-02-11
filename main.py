@@ -8,7 +8,7 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -57,6 +57,9 @@ SCAN_STATE = {
     "next_user": "Unknown",
     "last_run_time": None
 }
+
+# Timezone: WIB (UTC+7) - always use this for consistent scheduling
+WIB = timezone(timedelta(hours=7))
 
 
 async def process_user_jobs(user_id: int, bot_app) -> None:
@@ -279,7 +282,7 @@ async def scheduled_scan(bot_app) -> None:
     """
     while True:
         try:
-            current_hour = datetime.now().hour
+            current_hour = datetime.now(WIB).hour
             
             # === RSS Feed Scan (User Rotation) ===
             if current_hour % 2 == 0:
@@ -304,7 +307,7 @@ async def scheduled_scan(bot_app) -> None:
                 logger.info(f"=== Unified scan completed for {user_name} ===")
             
             # === Update Next Scan Info ===
-            now = datetime.now()
+            now = datetime.now(WIB)
             next_time = now.hour + 1
             next_user_name = "PARTNER" if next_time % 2 != 0 else "ZIDAN"
             
