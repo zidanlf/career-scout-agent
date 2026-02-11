@@ -142,22 +142,23 @@ async def process_monitored_urls(bot_app, user_id: int = None) -> None:
     logger.info(f"Processing {len(monitored_urls)} monitored URLs")
     
     for url_data in monitored_urls:
-        user_id = url_data["user_id"]
+        # Use the known user_id from parameter, or fall back to url_data
+        current_user_id = user_id if user_id else url_data.get("user_id")
         url = url_data["url"]
         label = url_data["label"]
         
         try:
-            logger.info(f"Scraping URL for user {user_id}: {url[:50]}...")
+            logger.info(f"Scraping URL for user {current_user_id}: {url[:50]}...")
             
             # Get user's CVs
-            cvs = await get_all_cvs(user_id)
+            cvs = await get_all_cvs(current_user_id)
             if not cvs:
-                logger.warning(f"User {user_id} has no CVs, skipping URL")
+                logger.warning(f"User {current_user_id} has no CVs, skipping URL")
                 continue
             
             # Check if specified label exists
             if label not in cvs:
-                logger.warning(f"CV label '{label}' not found for user {user_id}, skipping")
+                logger.warning(f"CV label '{label}' not found for user {current_user_id}, skipping")
                 continue
             
             # Scrape the URL
@@ -175,7 +176,7 @@ async def process_monitored_urls(bot_app, user_id: int = None) -> None:
             
             for job in jobs:
                 # Check if already processed
-                if await check_job_processed(job["hash"], user_id):
+                if await check_job_processed(job["hash"], current_user_id):
                     continue
                 
                 new_jobs += 1
@@ -193,20 +194,20 @@ async def process_monitored_urls(bot_app, user_id: int = None) -> None:
                         score = result.get("score", 0)
                         
                         # Log the job
-                        await log_processed_job(job["hash"], user_id, score, label)
+                        await log_processed_job(job["hash"], current_user_id, score, label)
                         
                         # Send notification if score > 60
                         if score > 60:
                             await send_scheduled_notification(
-                                bot_app, user_id, job, result
+                                bot_app, current_user_id, job, result
                             )
                             matches += 1
                     else:
-                        await log_processed_job(job["hash"], user_id, 0, "FAILED")
+                        await log_processed_job(job["hash"], current_user_id, 0, "FAILED")
                         
                 except Exception as e:
                     logger.error(f"Error analyzing job: {e}")
-                    await log_processed_job(job["hash"], user_id, 0, "ERROR")
+                    await log_processed_job(job["hash"], current_user_id, 0, "ERROR")
             
             logger.info(f"URL processed: {new_jobs} new jobs, {matches} matches sent")
             
