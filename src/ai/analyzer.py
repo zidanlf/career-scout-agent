@@ -20,9 +20,9 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Three-tier model priority list
 MODEL_PRIORITY = [
+    "openrouter/free",
     "google/gemma-3-27b-it:free",
     "google/gemma-3-12b-it:free",
-    "openrouter/free"
 ]
 
 # Retry config
