@@ -26,7 +26,7 @@ from src.database.db_manager import (
 )
 from src.scrapers.rss_parser import get_fresh_jobs
 from src.scrapers.web_scraper import scrape_job_listings
-from src.ai.analyzer import analyze_single_job, analyze_job_fit
+from src.ai.analyzer import analyze_job_fit, analyze_single_job, analyze_batch_jobs
 from src.notifications.bot_handler import create_bot_application
 
 # Load environment variables
@@ -93,10 +93,12 @@ async def process_user_jobs(user_id: int, bot_app) -> None:
     
     logger.info(f"Found {len(jobs)} new jobs for user {user_id}")
     
-    # Analyze each job
-    for job in jobs:
+    # Batch analyze all jobs at once
+    batch_results = await analyze_batch_jobs(jobs, user_data["cvs"])
+    
+    for idx, job in enumerate(jobs):
         try:
-            result = await analyze_single_job(job, user_data["cvs"])
+            result = batch_results.get(idx)
             
             if result:
                 score = result.get("score", 0)
@@ -113,7 +115,7 @@ async def process_user_jobs(user_id: int, bot_app) -> None:
                         bot_app, user_id, job, result
                     )
             else:
-                logger.error(f"AI analysis failed for job: {job['title'][:50]}...")
+                logger.warning(f"No analysis result for job: {job['title'][:50]}...")
                 await log_processed_job(job["hash"], user_id, 0, "FAILED")
                 
         except Exception as e:
@@ -173,33 +175,32 @@ async def process_monitored_urls(bot_app, user_id: int = None) -> None:
             
             logger.info(f"Found {len(jobs)} jobs from URL")
             
-            # Process each job
-            new_jobs = 0
+            # Collect new (unprocessed) jobs
+            new_jobs = []
+            for job in jobs:
+                if not await check_job_processed(job["hash"], current_user_id):
+                    new_jobs.append(job)
+            
+            if not new_jobs:
+                logger.info(f"No new jobs from URL: {url[:50]}...")
+                continue
+            
+            logger.info(f"{len(new_jobs)} new jobs to analyze from URL")
+            
+            # Batch analyze all new jobs
+            cv_for_analysis = {label: cvs[label]}
+            batch_results = await analyze_batch_jobs(new_jobs, cv_for_analysis)
+            
             matches = 0
             
-            for job in jobs:
-                # Check if already processed
-                if await check_job_processed(job["hash"], current_user_id):
-                    continue
-                
-                new_jobs += 1
-                
-                # Analyze with specific CV based on label
-                cv_for_analysis = {label: cvs[label]}
-                
+            for idx, job in enumerate(new_jobs):
                 try:
-                    result = await analyze_job_fit(
-                        f"Title: {job['title']}\n\n{job.get('description', '')}",
-                        cv_for_analysis
-                    )
+                    result = batch_results.get(idx)
                     
                     if result:
                         score = result.get("score", 0)
-                        
-                        # Log the job
                         await log_processed_job(job["hash"], current_user_id, score, label)
                         
-                        # Send notification if score > 60
                         if score > 60:
                             await send_scheduled_notification(
                                 bot_app, current_user_id, job, result
@@ -209,10 +210,10 @@ async def process_monitored_urls(bot_app, user_id: int = None) -> None:
                         await log_processed_job(job["hash"], current_user_id, 0, "FAILED")
                         
                 except Exception as e:
-                    logger.error(f"Error analyzing job: {e}")
+                    logger.error(f"Error processing job result: {e}")
                     await log_processed_job(job["hash"], current_user_id, 0, "ERROR")
             
-            logger.info(f"URL processed: {new_jobs} new jobs, {matches} matches sent")
+            logger.info(f"URL processed: {len(new_jobs)} new jobs, {matches} matches sent")
             
         except Exception as e:
             logger.error(f"Error processing URL {url[:50]}...: {e}")

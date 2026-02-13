@@ -325,3 +325,161 @@ async def analyze_single_job(
     # Combine title and description for better context
     job_text = f"Title: {job.get('title', '')}\n\n{job.get('description', '')}"
     return await analyze_job_fit(job_text, cvs, api_key)
+
+
+# ============== BATCH ANALYSIS ==============
+
+BATCH_SIZE = 5  # Jobs per AI call
+
+
+def _build_batch_prompt(jobs: list[dict], cvs: dict[str, str]) -> str:
+    """Build a prompt that asks AI to analyze multiple jobs at once."""
+    cv_section = "\n\n".join([
+        f"=== CV Label: {label} ===\n{content}"
+        for label, content in cvs.items()
+    ])
+    
+    jobs_section = "\n\n".join([
+        f"--- JOB #{i} ---\nTitle: {job.get('title', '')}\nCompany: {job.get('company', 'Unknown')}\nDescription:\n{job.get('description', '')[:1200]}"
+        for i, job in enumerate(jobs)
+    ])
+    
+    return f"""You are a strict career advisor. Analyze EACH job below against the provided CV(s).
+
+CRITICAL RULES:
+- ONLY mention strengths explicitly supported by BOTH the job description AND the CV
+- ONLY mention gaps explicitly required in the job description but missing from the CV
+- Do NOT invent or assume any skills, experience, or requirements not explicitly stated
+- If a job description is too short (less than 100 words), set score to 0
+
+## Available CVs:
+{cv_section}
+
+## Jobs to Analyze:
+{jobs_section}
+
+## Task:
+For EACH job above, determine the best matching CV and calculate a score from 0-100.
+
+## Output Format:
+Respond ONLY with a valid JSON ARRAY (no markdown, no explanation):
+[{{"job_index": 0, "best_cv": "LABEL", "score": 0-100, "justification": "brief reason", "strengths": ["s1"], "gaps": ["g1"]}}, {{"job_index": 1, ...}}, ...]"""
+
+
+def _extract_batch_json(response_text: str) -> Optional[list]:
+    """Extract JSON array from batch response."""
+    if not response_text:
+        return None
+    
+    # Remove think tags
+    cleaned = re.sub(r'<think(?:ing)?(?:\s[^>]*)?>.*?</think(?:ing)?>', '', response_text, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r'<thought(?:\s[^>]*)?>.*?</thought>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r'<[^>]+>', '', cleaned)
+    cleaned = cleaned.strip()
+    
+    # Try direct parse
+    try:
+        result = json.loads(cleaned)
+        if isinstance(result, list):
+            return result
+    except json.JSONDecodeError:
+        pass
+    
+    # Try markdown code block
+    json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', cleaned, re.DOTALL)
+    if json_match:
+        try:
+            result = json.loads(json_match.group(1).strip())
+            if isinstance(result, list):
+                return result
+        except json.JSONDecodeError:
+            pass
+    
+    # Find array brackets
+    first_bracket = cleaned.find('[')
+    last_bracket = cleaned.rfind(']')
+    if first_bracket != -1 and last_bracket > first_bracket:
+        try:
+            result = json.loads(cleaned[first_bracket:last_bracket + 1])
+            if isinstance(result, list):
+                return result
+        except json.JSONDecodeError:
+            pass
+    
+    logger.warning(f"Failed to extract batch JSON. Sample: {response_text[:300]}")
+    return None
+
+
+async def analyze_batch_jobs(
+    jobs: list[dict],
+    cvs: dict[str, str],
+    api_key: Optional[str] = None
+) -> dict[int, dict]:
+    """
+    Analyze multiple jobs in batches of BATCH_SIZE.
+    
+    Args:
+        jobs: List of job dicts with 'title', 'description', etc.
+        cvs: Dictionary of {label: cv_content}
+        api_key: Optional API key override
+    
+    Returns:
+        Dict mapping job list index -> analysis result dict
+    """
+    key = api_key or os.getenv("OPENROUTER_API_KEY")
+    if not key:
+        logger.error("OpenRouter API key not configured")
+        return {}
+    
+    if not cvs:
+        logger.warning("No CVs provided for batch analysis")
+        return {}
+    
+    results = {}
+    total_batches = (len(jobs) + BATCH_SIZE - 1) // BATCH_SIZE
+    
+    for batch_num in range(total_batches):
+        start = batch_num * BATCH_SIZE
+        end = min(start + BATCH_SIZE, len(jobs))
+        batch = jobs[start:end]
+        
+        logger.info(f"Batch {batch_num + 1}/{total_batches}: analyzing {len(batch)} jobs...")
+        
+        prompt = _build_batch_prompt(batch, cvs)
+        response, model_used = await _call_with_fallback(prompt, key, timeout=90.0)
+        
+        if response:
+            batch_results = _extract_batch_json(response)
+            
+            if batch_results and isinstance(batch_results, list):
+                for item in batch_results:
+                    if not isinstance(item, dict):
+                        continue
+                    job_idx = item.get("job_index", -1)
+                    if 0 <= job_idx < len(batch):
+                        item["score"] = int(item.get("score", 0))
+                        item.setdefault("strengths", [])
+                        item.setdefault("gaps", [])
+                        item["model_used"] = model_used
+                        results[start + job_idx] = item
+                
+                logger.info(f"Batch {batch_num + 1}: parsed {len([r for r in batch_results if isinstance(r, dict)])} results (via {model_used})")
+            else:
+                logger.warning(f"Batch {batch_num + 1}: failed to parse, falling back to single analysis")
+                # Fallback: analyze individually
+                for i, job in enumerate(batch):
+                    job_text = f"Title: {job.get('title', '')}\n\n{job.get('description', '')}"
+                    result = await analyze_job_fit(job_text, cvs, key)
+                    if result:
+                        results[start + i] = result
+                    await asyncio.sleep(3)
+        else:
+            logger.error(f"Batch {batch_num + 1}: all models failed")
+        
+        # Delay between batches
+        if batch_num < total_batches - 1:
+            await asyncio.sleep(3)
+    
+    logger.info(f"Batch analysis complete: {len(results)}/{len(jobs)} jobs analyzed")
+    return results
+
