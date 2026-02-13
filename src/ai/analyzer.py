@@ -9,6 +9,7 @@ import httpx
 import logging
 import os
 import re
+import asyncio
 from typing import Optional
 
 # Configure module logger
@@ -17,12 +18,16 @@ logger = logging.getLogger(__name__)
 # OpenRouter API endpoint
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# Three-tier model priority list (verified available on OpenRouter)
+# Three-tier model priority list
 MODEL_PRIORITY = [
-    "tngtech/deepseek-r1t2-chimera:free",
-    "stepfun/step-3.5-flash:free",
+    "google/gemma-3-27b-it:free",
+    "google/gemma-3-12b-it:free",
     "openrouter/free"
 ]
+
+# Retry config
+MAX_RETRIES = 2
+RETRY_DELAY_BASE = 5  # seconds, will be multiplied by attempt number
 
 
 def _build_prompt(job_description: str, cvs: dict[str, str]) -> str:
@@ -147,7 +152,7 @@ async def _call_openrouter(
     model: str,
     timeout: float = 60.0
 ) -> Optional[str]:
-    """Make API call to OpenRouter with specified model."""
+    """Make API call to OpenRouter with specified model. Retries on 429."""
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -160,38 +165,50 @@ async def _call_openrouter(
         "messages": [
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0.3,  # Lower temperature for consistent JSON output
-        "max_tokens": 2000   # Increased to prevent truncation
+        "temperature": 0.3,
+        "max_tokens": 2000
     }
     
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                OPENROUTER_URL,
-                headers=headers,
-                json=payload,
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            
-            if not content:
-                logger.warning(f"Empty content from {model}")
-                return None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    OPENROUTER_URL,
+                    headers=headers,
+                    json=payload,
+                )
                 
-            logger.debug(f"Response from {model}: {len(content)} chars")
-            return content
-            
-    except httpx.TimeoutException:
-        logger.warning(f"Timeout with model {model} (>{timeout}s)")
-        return None
-    except httpx.HTTPStatusError as e:
-        logger.warning(f"HTTP error with model {model}: {e.response.status_code}")
-        return None
-    except Exception as e:
-        logger.warning(f"API call failed with model {model}: {e}")
-        return None
+                # Handle rate limiting with retry
+                if response.status_code == 429:
+                    delay = RETRY_DELAY_BASE * attempt
+                    logger.warning(f"Rate limited (429) on {model}, retrying in {delay}s (attempt {attempt}/{MAX_RETRIES})...")
+                    await asyncio.sleep(delay)
+                    continue
+                
+                response.raise_for_status()
+                
+                data = response.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                
+                if not content:
+                    logger.warning(f"Empty content from {model}")
+                    return None
+                    
+                logger.debug(f"Response from {model}: {len(content)} chars")
+                return content
+                
+        except httpx.TimeoutException:
+            logger.warning(f"Timeout with model {model} (>{timeout}s)")
+            return None
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"HTTP error with model {model}: {e.response.status_code}")
+            return None
+        except Exception as e:
+            logger.warning(f"API call failed with model {model}: {e}")
+            return None
+    
+    logger.warning(f"All {MAX_RETRIES} retries exhausted for {model}")
+    return None
 
 
 async def _call_with_fallback(
@@ -203,7 +220,7 @@ async def _call_with_fallback(
     Call OpenRouter with three-tier fallback.
     Returns tuple of (response_content, model_used) or (None, None) if all fail.
     """
-    for model in MODEL_PRIORITY:
+    for i, model in enumerate(MODEL_PRIORITY):
         logger.info(f"Trying model: {model}")
         response = await _call_openrouter(prompt, api_key, model, timeout)
         
@@ -215,9 +232,12 @@ async def _call_with_fallback(
                 return response, model
             else:
                 logger.warning(f"Model {model} returned unparseable response, trying next...")
-                continue
+        else:
+            logger.warning(f"Model {model} failed, trying next...")
         
-        logger.warning(f"Model {model} failed, trying next...")
+        # Delay between model switches to avoid burst rate limiting
+        if i < len(MODEL_PRIORITY) - 1:
+            await asyncio.sleep(3)
     
     logger.error("All models failed")
     return None, None
