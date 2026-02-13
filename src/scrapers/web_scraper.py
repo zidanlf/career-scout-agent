@@ -591,9 +591,200 @@ def _parse_generic(html: str, base_url: str) -> list[dict]:
     return jobs
 
 
+
+# ============== JOB DETAIL PAGE FETCHING ==============
+
+async def _fetch_linkedin_detail(job: dict) -> str:
+    """Fetch full job description from LinkedIn detail page."""
+    url = job.get("link", "")
+    if not url:
+        return ""
+    
+    try:
+        html = await _fetch_page(url)
+        if not html:
+            return ""
+        
+        soup = BeautifulSoup(html, "lxml")
+        
+        # LinkedIn job detail selectors (public/guest view)
+        desc_selectors = [
+            ".show-more-less-html__markup",
+            ".description__text",
+            ".decorated-job-posting__details",
+            "section.description",
+            ".core-section-container__content",
+        ]
+        
+        for selector in desc_selectors:
+            elem = soup.select_one(selector)
+            if elem:
+                text = elem.get_text(separator="\n", strip=True)
+                if len(text) > 50:  # Must be meaningful content
+                    return text[:2000]
+        
+        # Fallback: try meta description
+        meta = soup.select_one("meta[name='description']")
+        if meta:
+            content = meta.get("content", "")
+            if len(content) > 50:
+                return content[:2000]
+        
+        return ""
+        
+    except Exception as e:
+        logger.debug(f"Error fetching LinkedIn detail for {url[:50]}: {e}")
+        return ""
+
+
+async def _fetch_kalibrr_detail(job: dict) -> str:
+    """Fetch full job description from Kalibrr API detail endpoint."""
+    url = job.get("link", "")
+    if not url:
+        return ""
+    
+    try:
+        # Extract job ID from URL: /c/{company}/jobs/{id}/{slug}
+        parts = url.rstrip("/").split("/")
+        job_id = None
+        for i, part in enumerate(parts):
+            if part == "jobs" and i + 1 < len(parts):
+                job_id = parts[i + 1]
+                break
+        
+        if not job_id:
+            return ""
+        
+        # Use Kalibrr's job detail API
+        api_url = f"https://www.kalibrr.com/kjs/job_board/job/{job_id}"
+        
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(api_url, headers={
+                "User-Agent": HEADERS["User-Agent"],
+                "Accept": "application/json",
+            })
+            response.raise_for_status()
+            data = response.json()
+        
+        # Extract description from API response
+        desc_raw = data.get("description", "")
+        if desc_raw and "<" in desc_raw:
+            soup = BeautifulSoup(desc_raw, "lxml")
+            description = soup.get_text(separator="\n", strip=True)
+        else:
+            description = str(desc_raw)
+        
+        # Also get qualifications if available
+        quals = data.get("qualifications", "")
+        if quals and "<" in quals:
+            soup = BeautifulSoup(quals, "lxml")
+            quals_text = soup.get_text(separator="\n", strip=True)
+        elif quals:
+            quals_text = str(quals)
+        else:
+            quals_text = ""
+        
+        full_text = description
+        if quals_text:
+            full_text += "\n\nQualifications:\n" + quals_text
+        
+        return full_text[:2000]
+        
+    except Exception as e:
+        logger.debug(f"Error fetching Kalibrr detail for {url[:50]}: {e}")
+        return ""
+
+
+async def _fetch_glints_detail(job: dict) -> str:
+    """Fetch full job description from Glints using Playwright."""
+    url = job.get("link", "")
+    if not url:
+        return ""
+    
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(user_agent=HEADERS["User-Agent"])
+            page = await context.new_page()
+            
+            try:
+                await page.goto(url, wait_until="networkidle", timeout=30000)
+                
+                # Wait for description content
+                desc_selectors = [
+                    "[data-testid='job-description']",
+                    ".job-description",
+                    ".ql-editor",
+                    "div[class*='Description']",
+                ]
+                
+                for selector in desc_selectors:
+                    try:
+                        await page.wait_for_selector(selector, timeout=5000)
+                        break
+                    except:
+                        continue
+                
+                content = await page.content()
+                soup = BeautifulSoup(content, "lxml")
+                
+                for selector in desc_selectors:
+                    elem = soup.select_one(selector)
+                    if elem:
+                        text = elem.get_text(separator="\n", strip=True)
+                        if len(text) > 50:
+                            return text[:2000]
+                
+                return ""
+                
+            finally:
+                await browser.close()
+                
+    except Exception as e:
+        logger.debug(f"Error fetching Glints detail for {url[:50]}: {e}")
+        return ""
+
+
+async def _enrich_jobs_with_details(jobs: list[dict], platform: str) -> list[dict]:
+    """
+    Enrich job listings with full descriptions from detail pages.
+    Only fetches details for jobs that have empty descriptions.
+    Adds 1-second delay between requests to avoid rate limiting.
+    """
+    detail_fetchers = {
+        "linkedin": _fetch_linkedin_detail,
+        "kalibrr": _fetch_kalibrr_detail,
+        "glints": _fetch_glints_detail,
+    }
+    
+    fetcher = detail_fetchers.get(platform)
+    if not fetcher:
+        return jobs
+    
+    enriched_count = 0
+    
+    for job in jobs:
+        # Skip if already has a meaningful description
+        if job.get("description") and len(job["description"]) > 100:
+            continue
+        
+        description = await fetcher(job)
+        if description:
+            job["description"] = description
+            enriched_count += 1
+            logger.debug(f"Enriched: {job['title'][:40]}... ({len(description)} chars)")
+        
+        # Rate limit: 1 second between requests
+        await asyncio.sleep(1)
+    
+    logger.info(f"Enriched {enriched_count}/{len(jobs)} jobs with full descriptions ({platform})")
+    return jobs
+
+
 async def scrape_job_listings(url: str) -> list[dict]:
     """
     Scrape job listings from a search results page.
+    After listing scrape, fetches individual detail pages for full descriptions.
     
     Args:
         url: Job search results URL (Kalibrr, LinkedIn, Glints, Dealls, or other)
@@ -608,24 +799,28 @@ async def scrape_job_listings(url: str) -> list[dict]:
     
     # SPA platforms: use API or Browser for dynamic content
     if platform == "kalibrr":
-        return await _scrape_kalibrr_api(url)
+        jobs = await _scrape_kalibrr_api(url)
     elif platform == "glints":
         # Glints firewall is very aggressive, use browser
-        return await _scrape_glints_browser(url)
-    
-    # HTML-based platforms: fetch page and parse
-    html = await _fetch_page(url)
-    if not html:
-        logger.error(f"Failed to fetch page: {url}")
-        return []
-    
-    if platform == "linkedin":
-        jobs = _parse_linkedin(html, url)
-    elif platform == "dealls":
-        jobs = _parse_dealls(html, url)
+        jobs = await _scrape_glints_browser(url)
     else:
-        logger.warning(f"Unknown platform, using generic parser for: {url}")
-        jobs = _parse_generic(html, url)
+        # HTML-based platforms: fetch page and parse
+        html = await _fetch_page(url)
+        if not html:
+            logger.error(f"Failed to fetch page: {url}")
+            return []
+        
+        if platform == "linkedin":
+            jobs = _parse_linkedin(html, url)
+        elif platform == "dealls":
+            jobs = _parse_dealls(html, url)
+        else:
+            logger.warning(f"Unknown platform, using generic parser for: {url}")
+            jobs = _parse_generic(html, url)
+    
+    # Enrich jobs with full descriptions from detail pages
+    if jobs:
+        jobs = await _enrich_jobs_with_details(jobs, platform)
     
     return jobs
 

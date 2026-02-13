@@ -32,7 +32,13 @@ def _build_prompt(job_description: str, cvs: dict[str, str]) -> str:
         for label, content in cvs.items()
     ])
     
-    return f"""You are a career advisor. Analyze the job description and compare it against the provided CV(s) to determine the best match.
+    return f"""You are a strict career advisor. Analyze the job description and compare it against the provided CV(s).
+
+CRITICAL RULES:
+- ONLY mention strengths that are explicitly supported by BOTH the job description AND the CV
+- ONLY mention gaps that are explicitly required in the job description but missing from the CV
+- Do NOT invent or assume any skills, experience, or requirements not explicitly stated
+- If the job description is too short or vague (less than 100 words), set score to 0 and add "Insufficient job description data" as the first gap
 
 ## Job Description:
 {job_description}
@@ -43,13 +49,14 @@ def _build_prompt(job_description: str, cvs: dict[str, str]) -> str:
 ## Task:
 1. Compare the job requirements against ALL provided CVs
 2. Identify which CV is the BEST match
-3. Calculate a match score from 0-100
-4. List key strengths (skills/experience that match)
-5. List gaps (missing requirements)
+3. Calculate a match score from 0-100 based ONLY on verifiable matches
+4. List key strengths (skills/experience from the CV that match specific job requirements)
+5. List gaps (specific job requirements not found in the CV)
 
 ## Output Format:
 Respond ONLY with valid JSON (no markdown, no explanation):
 {{"best_cv": "LABEL", "score": 0-100, "justification": "brief reason", "strengths": ["strength1", "strength2"], "gaps": ["gap1", "gap2"]}}"""
+
 
 
 def _extract_json(response_text: str) -> Optional[dict]:
