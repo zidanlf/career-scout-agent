@@ -64,6 +64,14 @@ async def init_db() -> None:
             )
         """)
         
+        # User settings table for per-user toggles
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+                ai_enabled INTEGER DEFAULT 1
+            )
+        """)
+        
         await db.commit()
         logger.info("Database initialized successfully")
 
@@ -83,6 +91,32 @@ async def upsert_user(telegram_id: int, name: str) -> None:
         )
         await db.commit()
         logger.info(f"User upserted: {telegram_id} ({name})")
+
+
+async def get_ai_enabled(user_id: int) -> bool:
+    """Check if AI analysis is enabled for a user. Default: True."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT ai_enabled FROM user_settings WHERE user_id = ?",
+            (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return bool(row[0]) if row else True  # Default: AI on
+
+
+async def set_ai_enabled(user_id: int, enabled: bool) -> None:
+    """Set AI analysis on/off for a user."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO user_settings (user_id, ai_enabled)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET ai_enabled = excluded.ai_enabled
+            """,
+            (user_id, int(enabled))
+        )
+        await db.commit()
+        logger.info(f"AI {'enabled' if enabled else 'disabled'} for user {user_id}")
 
 
 async def get_user_data(telegram_id: int) -> Optional[dict]:

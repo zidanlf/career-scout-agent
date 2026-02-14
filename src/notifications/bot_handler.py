@@ -33,6 +33,8 @@ from src.database.db_manager import (
     add_monitored_url,
     get_monitored_urls,
     delete_monitored_url,
+    get_ai_enabled,
+    set_ai_enabled,
 )
 from src.scrapers.rss_parser import get_fresh_jobs
 from src.ai.analyzer import analyze_single_job, analyze_job_fit
@@ -100,6 +102,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/scanmonitor - Scan all monitored URLs now\n\n"
         "<b>Analysis</b>\n"
         "/scan &lt;label&gt; &lt;text&gt; - Manual job analysis\n"
+        "/ai [on|off] - Toggle AI analysis\n"
         "/next - Check next scan schedule\n"
         "/report - 24h summary\n"
         "/status - System status\n\n"
@@ -720,6 +723,43 @@ async def cmd_listmonitor(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_html("\n".join(lines))
 
 
+@authorized_only
+async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle AI analysis on/off. Usage: /ai [on|off]"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        # Show current status
+        enabled = await get_ai_enabled(user_id)
+        status = "🟢 ON" if enabled else "🔴 OFF"
+        await update.message.reply_html(
+            f"<b>AI Analysis Status</b>\n\n"
+            f"Status: {status}\n\n"
+            f"<code>/ai on</code>  - Enable AI (score + strengths/gaps)\n"
+            f"<code>/ai off</code> - Disable AI (notify all new jobs)"
+        )
+        return
+    
+    arg = context.args[0].lower()
+    
+    if arg == "on":
+        await set_ai_enabled(user_id, True)
+        await update.message.reply_html(
+            "🟢 <b>AI Analysis: ON</b>\n\n"
+            "Jobs will be analyzed and filtered by score.\n"
+            "Only jobs with score &gt; 60 will be notified."
+        )
+    elif arg == "off":
+        await set_ai_enabled(user_id, False)
+        await update.message.reply_html(
+            "🔴 <b>AI Analysis: OFF</b>\n\n"
+            "All new jobs will be sent as notifications.\n"
+            "No score/strengths/gaps analysis."
+        )
+    else:
+        await update.message.reply_text("Usage: /ai on or /ai off")
+
+
 # ============== APPLICATION FACTORY ==============
 
 def create_bot_application(token: str) -> Application:
@@ -744,6 +784,7 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(CommandHandler("scanmonitor", cmd_scanmonitor))
     app.add_handler(CommandHandler("delmonitor", cmd_delmonitor))
     app.add_handler(CommandHandler("listmonitor", cmd_listmonitor))
+    app.add_handler(CommandHandler("ai", cmd_ai))
     
     # Register document handler for .txt CV uploads (stateful step 1)
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))

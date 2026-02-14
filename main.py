@@ -23,6 +23,7 @@ from src.database.db_manager import (
     get_all_monitored_urls,
     get_all_cvs,
     check_job_processed,
+    get_ai_enabled,
 )
 from src.scrapers.rss_parser import get_fresh_jobs
 from src.scrapers.web_scraper import scrape_job_listings
@@ -93,34 +94,40 @@ async def process_user_jobs(user_id: int, bot_app) -> None:
     
     logger.info(f"Found {len(jobs)} new jobs for user {user_id}")
     
-    # Batch analyze all jobs at once
-    batch_results = await analyze_batch_jobs(jobs, user_data["cvs"])
+    # Check if AI analysis is enabled for this user
+    ai_enabled = await get_ai_enabled(user_id)
     
-    for idx, job in enumerate(jobs):
-        try:
-            result = batch_results.get(idx)
-            
-            if result:
-                score = result.get("score", 0)
-                best_cv = result.get("best_cv", "?")
+    if ai_enabled:
+        # Batch analyze all jobs at once
+        batch_results = await analyze_batch_jobs(jobs, user_data["cvs"])
+        
+        for idx, job in enumerate(jobs):
+            try:
+                result = batch_results.get(idx)
                 
-                # Log the processed job
-                await log_processed_job(job["hash"], user_id, score, best_cv)
-                
-                logger.info(f"Job '{job['title'][:50]}...' scored {score} for CV '{best_cv}'")
-                
-                # Send notification if score > 60
-                if score > 60:
-                    await send_scheduled_notification(
-                        bot_app, user_id, job, result
-                    )
-            else:
-                logger.warning(f"No analysis result for job: {job['title'][:50]}...")
-                await log_processed_job(job["hash"], user_id, 0, "FAILED")
-                
-        except Exception as e:
-            logger.error(f"Error processing job '{job['title'][:50]}...': {e}")
-            await log_processed_job(job["hash"], user_id, 0, "ERROR")
+                if result:
+                    score = result.get("score", 0)
+                    best_cv = result.get("best_cv", "?")
+                    await log_processed_job(job["hash"], user_id, score, best_cv)
+                    logger.info(f"Job '{job['title'][:50]}...' scored {score} for CV '{best_cv}'")
+                    
+                    if score > 60:
+                        await send_scheduled_notification(bot_app, user_id, job, result)
+                else:
+                    logger.warning(f"No analysis result for job: {job['title'][:50]}...")
+                    await log_processed_job(job["hash"], user_id, 0, "FAILED")
+            except Exception as e:
+                logger.error(f"Error processing job '{job['title'][:50]}...': {e}")
+                await log_processed_job(job["hash"], user_id, 0, "ERROR")
+    else:
+        # AI off: send all new jobs as simple notifications
+        logger.info(f"AI disabled for user {user_id}, sending {len(jobs)} jobs directly")
+        for job in jobs:
+            try:
+                await log_processed_job(job["hash"], user_id, 0, "NO_AI")
+                await send_simple_notification(bot_app, user_id, job)
+            except Exception as e:
+                logger.error(f"Error sending notification for job '{job['title'][:50]}...': {e}")
 
 
 async def process_monitored_urls(bot_app, user_id: int = None) -> None:
@@ -155,16 +162,17 @@ async def process_monitored_urls(bot_app, user_id: int = None) -> None:
         try:
             logger.info(f"Scraping URL for user {current_user_id}: {url[:50]}...")
             
-            # Get user's CVs
+            # Get user's CVs (only needed if AI is on)
+            ai_enabled = await get_ai_enabled(current_user_id)
             cvs = await get_all_cvs(current_user_id)
-            if not cvs:
-                logger.warning(f"User {current_user_id} has no CVs, skipping URL")
-                continue
             
-            # Check if specified label exists
-            if label not in cvs:
-                logger.warning(f"CV label '{label}' not found for user {current_user_id}, skipping")
-                continue
+            if ai_enabled:
+                if not cvs:
+                    logger.warning(f"User {current_user_id} has no CVs, skipping URL (AI mode)")
+                    continue
+                if label not in cvs:
+                    logger.warning(f"CV label '{label}' not found for user {current_user_id}, skipping")
+                    continue
             
             # Scrape the URL
             jobs = await scrape_job_listings(url)
@@ -185,35 +193,41 @@ async def process_monitored_urls(bot_app, user_id: int = None) -> None:
                 logger.info(f"No new jobs from URL: {url[:50]}...")
                 continue
             
-            logger.info(f"{len(new_jobs)} new jobs to analyze from URL")
+            logger.info(f"{len(new_jobs)} new jobs from URL")
             
-            # Batch analyze all new jobs
-            cv_for_analysis = {label: cvs[label]}
-            batch_results = await analyze_batch_jobs(new_jobs, cv_for_analysis)
-            
-            matches = 0
-            
-            for idx, job in enumerate(new_jobs):
-                try:
-                    result = batch_results.get(idx)
-                    
-                    if result:
-                        score = result.get("score", 0)
-                        await log_processed_job(job["hash"], current_user_id, score, label)
-                        
-                        if score > 60:
-                            await send_scheduled_notification(
-                                bot_app, current_user_id, job, result
-                            )
-                            matches += 1
-                    else:
-                        await log_processed_job(job["hash"], current_user_id, 0, "FAILED")
-                        
-                except Exception as e:
-                    logger.error(f"Error processing job result: {e}")
-                    await log_processed_job(job["hash"], current_user_id, 0, "ERROR")
-            
-            logger.info(f"URL processed: {len(new_jobs)} new jobs, {matches} matches sent")
+            if ai_enabled:
+                # AI mode: batch analyze
+                cv_for_analysis = {label: cvs[label]}
+                batch_results = await analyze_batch_jobs(new_jobs, cv_for_analysis)
+                
+                matches = 0
+                for idx, job in enumerate(new_jobs):
+                    try:
+                        result = batch_results.get(idx)
+                        if result:
+                            score = result.get("score", 0)
+                            await log_processed_job(job["hash"], current_user_id, score, label)
+                            if score > 60:
+                                await send_scheduled_notification(bot_app, current_user_id, job, result)
+                                matches += 1
+                        else:
+                            await log_processed_job(job["hash"], current_user_id, 0, "FAILED")
+                    except Exception as e:
+                        logger.error(f"Error processing job result: {e}")
+                        await log_processed_job(job["hash"], current_user_id, 0, "ERROR")
+                
+                logger.info(f"URL processed: {len(new_jobs)} new jobs, {matches} matches sent")
+            else:
+                # AI off: send all new jobs directly
+                logger.info(f"AI disabled, sending {len(new_jobs)} jobs directly")
+                for job in new_jobs:
+                    try:
+                        await log_processed_job(job["hash"], current_user_id, 0, "NO_AI")
+                        await send_simple_notification(bot_app, current_user_id, job)
+                    except Exception as e:
+                        logger.error(f"Error sending notification: {e}")
+                
+                logger.info(f"URL processed: {len(new_jobs)} new jobs sent (no AI)")
             
         except Exception as e:
             logger.error(f"Error processing URL {url[:50]}...: {e}")
@@ -272,6 +286,34 @@ async def send_scheduled_notification(
         
     except Exception as e:
         logger.error(f"Failed to send notification to {user_id}: {e}")
+
+
+async def send_simple_notification(
+    bot_app,
+    user_id: int,
+    job: dict
+) -> None:
+    """Send a simple job notification without AI analysis."""
+    try:
+        title = job.get('title', 'No Title')
+        company = job.get('company', 'Unknown Company')
+        link = job.get('link', '#')
+        
+        text = (
+            f"\U0001f4cc <b>{title}</b>\n"
+            f"\U0001f3e2 {company}\n\n"
+            f"<a href=\"{link}\">Apply Here \u2192</a>"
+        )
+        
+        await bot_app.bot.send_message(
+            chat_id=user_id,
+            text=text,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to send simple notification to {user_id}: {e}")
 
 
 async def scheduled_scan(bot_app) -> None:
