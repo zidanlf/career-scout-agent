@@ -178,7 +178,10 @@ async def send_notification(bot_app, user_id: int, job: dict) -> None:
         company = job.get('company', 'Unknown Company')
         link = job.get('link', '#')
         
+        platform = job.get('platform', 'unknown').capitalize()
+        
         text = (
+            f"Job Found in {platform}!\n\n"
             f"<b>{title}</b>\n"
             f"{company}\n\n"
             f"<a href=\"{link}\">Apply Here</a>"

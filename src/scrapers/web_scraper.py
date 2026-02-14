@@ -370,6 +370,9 @@ async def _scrape_glints_browser(url: str) -> list[dict]:
                             )
                             for cc in candidates:
                                 text = cc.get_text(strip=True)
+                                # Skip salary-like text
+                                if re.search(r'(Rp|IDR|\d+\s*jt|\d+\s*rb|\$)', text, re.IGNORECASE):
+                                    continue
                                 if text and text != title and 2 < len(text) < 80:
                                     company = text
                                     break
@@ -881,6 +884,10 @@ async def scrape_job_listings(url: str) -> list[dict]:
     # Enrich jobs with full descriptions from detail pages
     if jobs:
         jobs = await _enrich_jobs_with_details(jobs, platform)
+    
+    # Add platform to each job
+    for job in jobs:
+        job["platform"] = platform
     
     return jobs
 

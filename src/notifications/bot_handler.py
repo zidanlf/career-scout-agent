@@ -215,6 +215,7 @@ async def cmd_scanrss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             link = job.get('link', '#')
             
             text = (
+                f"Job Found in RSS!\n\n"
                 f"<b>{title}</b>\n"
                 f"{company}\n\n"
                 f"<a href=\"{link}\">Apply Here</a>"
@@ -344,7 +345,7 @@ async def cmd_delmonitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def cmd_scanmonitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Trigger a manual scan of your monitored URLs."""
     user_id = update.effective_user.id
-    await update.message.reply_text("⚙️ Scanning your monitored URLs...")
+    await update.message.reply_text("Scanning your monitored URLs...")
     
     from main import process_monitored_urls
     
