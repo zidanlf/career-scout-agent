@@ -130,6 +130,19 @@ async def log_processed_job(job_hash: str, user_id: int) -> None:
         logger.debug(f"Job logged: hash={job_hash[:8]}... user={user_id}")
 
 
+async def clear_processed_jobs(user_id: int) -> int:
+    """Clear all processed jobs for a user. Returns count deleted."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM processed_jobs WHERE user_id = ?",
+            (user_id,)
+        )
+        await db.commit()
+        count = cursor.rowcount
+        logger.info(f"Cleared {count} processed jobs for user {user_id}")
+        return count
+
+
 async def get_jobs_last_24h(user_id: int) -> list:
     """Get all processed jobs from the last 24 hours for reporting."""
     cutoff = datetime.now() - timedelta(hours=24)

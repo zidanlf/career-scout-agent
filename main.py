@@ -95,13 +95,14 @@ async def process_user_jobs(user_id: int, bot_app) -> None:
     logger.info(f"RSS scan done for user {user_id}: {sent}/{len(jobs)} jobs notified")
 
 
-async def process_monitored_urls(bot_app, user_id: int = None) -> None:
+async def process_monitored_urls(bot_app, user_id: int = None) -> dict:
     """
     Process monitored URLs. 
-    If user_id is provided, only process URLs for that user.
-    Otherwise, process all monitored URLs.
+    Returns summary dict: {total_scraped, new_sent, already_processed, errors}
     """
     logger.info(f"=== Starting monitored URL scan {'for user ' + str(user_id) if user_id else '(All Users)'} ===")
+    
+    summary = {"total_scraped": 0, "new_sent": 0, "already_processed": 0, "errors": 0}
     
     # Get monitored URLs
     from src.database.db_manager import get_monitored_urls
@@ -113,7 +114,7 @@ async def process_monitored_urls(bot_app, user_id: int = None) -> None:
     
     if not monitored_urls:
         logger.info("No monitored URLs to process")
-        return
+        return summary
     
     logger.info(f"Processing {len(monitored_urls)} monitored URLs")
     
@@ -131,6 +132,7 @@ async def process_monitored_urls(bot_app, user_id: int = None) -> None:
                 logger.info(f"No jobs found from URL: {url[:50]}...")
                 continue
             
+            summary["total_scraped"] += len(jobs)
             logger.info(f"Found {len(jobs)} jobs from URL")
             
             # Collect new (unprocessed) jobs
@@ -138,6 +140,9 @@ async def process_monitored_urls(bot_app, user_id: int = None) -> None:
             for job in jobs:
                 if not await check_job_processed(job["hash"], current_user_id):
                     new_jobs.append(job)
+            
+            already = len(jobs) - len(new_jobs)
+            summary["already_processed"] += already
             
             if not new_jobs:
                 logger.info(f"No new jobs from URL: {url[:50]}...")
@@ -150,16 +155,20 @@ async def process_monitored_urls(bot_app, user_id: int = None) -> None:
                 try:
                     await log_processed_job(job["hash"], current_user_id)
                     await send_notification(bot_app, current_user_id, job)
+                    summary["new_sent"] += 1
                 except Exception as e:
                     logger.error(f"Error sending notification: {e}")
+                    summary["errors"] += 1
             
             logger.info(f"URL processed: {len(new_jobs)} new jobs sent")
             
         except Exception as e:
             logger.error(f"Error processing URL {url[:50]}...: {e}")
+            summary["errors"] += 1
             continue
     
     logger.info("=== Monitored URL scan completed ===")
+    return summary
 
 
 async def send_notification(bot_app, user_id: int, job: dict) -> None:

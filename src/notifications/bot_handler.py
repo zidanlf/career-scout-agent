@@ -29,6 +29,7 @@ from src.database.db_manager import (
     delete_monitored_url,
     log_processed_job,
     check_job_processed,
+    clear_processed_jobs,
 )
 from src.scrapers.rss_parser import get_fresh_jobs
 
@@ -91,7 +92,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "<b>Info</b>\n"
         "/next - Check next scan schedule\n"
         "/report - 24h summary\n"
-        "/status - System status"
+        "/status - System status\n"
+        "/clearjobs - Reset job history (re-discover all jobs)"
     )
     logger.info(f"User registered: {user.id} ({user.full_name})")
 
@@ -342,15 +344,33 @@ async def cmd_delmonitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def cmd_scanmonitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Trigger a manual scan of your monitored URLs."""
     user_id = update.effective_user.id
-    await update.message.reply_text("Starting manual scan of your monitored URLs. Please wait...")
+    await update.message.reply_text("⚙️ Scanning your monitored URLs...")
     
-    # Import here to avoid circular dependency
     from main import process_monitored_urls
     
-    # Run the orchestration for ONLY this user
-    await process_monitored_urls(context.application, user_id=user_id)
+    summary = await process_monitored_urls(context.application, user_id=user_id)
     
-    await update.message.reply_text("Monitored URL scan completed. Check new jobs above.")
+    # Show detailed summary
+    total_scraped = summary.get("total_scraped", 0)
+    new_sent = summary.get("new_sent", 0)
+    already_processed = summary.get("already_processed", 0)
+    errors = summary.get("errors", 0)
+    
+    text = (
+        "<b>Scan Complete</b>\n\n"
+        f"Jobs scraped: {total_scraped}\n"
+        f"New jobs sent: {new_sent}\n"
+        f"Already processed: {already_processed}\n"
+    )
+    if errors:
+        text += f"Errors: {errors}\n"
+    
+    if total_scraped == 0:
+        text += "\n<i>Tip: scraper returned 0 jobs. Check if the URL is still valid.</i>"
+    elif new_sent == 0 and already_processed > 0:
+        text += "\n<i>Tip: all jobs were already seen. Use /clearjobs to reset and rescan.</i>"
+    
+    await update.message.reply_html(text)
 
 
 @authorized_only
@@ -378,6 +398,18 @@ async def cmd_listmonitor(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_html("\n".join(lines))
 
 
+@authorized_only
+async def cmd_clearjobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear all processed jobs so they can be re-discovered."""
+    user_id = update.effective_user.id
+    count = await clear_processed_jobs(user_id)
+    await update.message.reply_html(
+        f"<b>Job history cleared</b>\n\n"
+        f"Deleted {count} processed job records.\n"
+        f"Run <code>/scanmonitor</code> to re-scan and get fresh notifications."
+    )
+
+
 # ============== APPLICATION FACTORY ==============
 
 def create_bot_application(token: str) -> Application:
@@ -398,6 +430,7 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(CommandHandler("scanmonitor", cmd_scanmonitor))
     app.add_handler(CommandHandler("delmonitor", cmd_delmonitor))
     app.add_handler(CommandHandler("listmonitor", cmd_listmonitor))
+    app.add_handler(CommandHandler("clearjobs", cmd_clearjobs))
     
     logger.info("Bot application created with all handlers")
     return app
