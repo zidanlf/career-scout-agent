@@ -179,9 +179,9 @@ async def send_notification(bot_app, user_id: int, job: dict) -> None:
         link = job.get('link', '#')
         
         text = (
-            f"\U0001f4cc <b>{title}</b>\n"
-            f"\U0001f3e2 {company}\n\n"
-            f"<a href=\"{link}\">Apply Here \u2192</a>"
+            f"<b>{title}</b>\n"
+            f"{company}\n\n"
+            f"<a href=\"{link}\">Apply Here</a>"
         )
         
         await bot_app.bot.send_message(

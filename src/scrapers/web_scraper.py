@@ -801,8 +801,11 @@ async def scrape_job_listings(url: str) -> list[dict]:
     if platform == "kalibrr":
         jobs = await _scrape_kalibrr_api(url)
     elif platform == "glints":
-        # Glints firewall is very aggressive, use browser
-        jobs = await _scrape_glints_browser(url)
+        # Try API first (faster), fall back to browser
+        jobs = await _scrape_glints_api(url)
+        if not jobs:
+            logger.info("Glints API returned 0 jobs, trying browser fallback...")
+            jobs = await _scrape_glints_browser(url)
     else:
         # HTML-based platforms: fetch page and parse
         html = await _fetch_page(url)

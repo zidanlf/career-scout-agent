@@ -215,9 +215,9 @@ async def cmd_scanrss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             link = job.get('link', '#')
             
             text = (
-                f"\U0001f4cc <b>{title}</b>\n"
-                f"\U0001f3e2 {company}\n\n"
-                f"<a href=\"{link}\">Apply Here \u2192</a>"
+                f"<b>{title}</b>\n"
+                f"{company}\n\n"
+                f"<a href=\"{link}\">Apply Here</a>"
             )
             
             await update.message.reply_html(text, disable_web_page_preview=True)
@@ -388,11 +388,10 @@ async def cmd_listmonitor(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     lines = ["<b>Your Monitored URLs</b>\n---------------------------"]
     for url_data in urls:
-        url_preview = url_data['url'][:40] + "..." if len(url_data['url']) > 40 else url_data['url']
         lines.append(
             f"\nID    : <code>{url_data['id']}</code>\n"
             f"TAG   : <code>{url_data['label']}</code>\n"
-            f"URL   : {url_preview}"
+            f"URL   : {url_data['url']}"
         )
     
     await update.message.reply_html("\n".join(lines))
