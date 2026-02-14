@@ -30,24 +30,11 @@ async def init_db() -> None:
             )
         """)
         
-        # CV slots table with unique constraint per user+label
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS cv_slots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER REFERENCES users(telegram_id) ON DELETE CASCADE,
-                label TEXT NOT NULL,
-                content TEXT NOT NULL,
-                UNIQUE(user_id, label)
-            )
-        """)
-        
-        # Processed jobs table with score and matching label
+        # Processed jobs table for deduplication
         await db.execute("""
             CREATE TABLE IF NOT EXISTS processed_jobs (
                 job_hash TEXT,
                 user_id INTEGER REFERENCES users(telegram_id) ON DELETE CASCADE,
-                score INTEGER,
-                matching_label TEXT,
                 found_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(job_hash, user_id)
             )
@@ -61,14 +48,6 @@ async def init_db() -> None:
                 url TEXT NOT NULL,
                 label TEXT NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # User settings table for per-user toggles
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS user_settings (
-                user_id INTEGER PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
-                ai_enabled INTEGER DEFAULT 1
             )
         """)
         
@@ -93,60 +72,15 @@ async def upsert_user(telegram_id: int, name: str) -> None:
         logger.info(f"User upserted: {telegram_id} ({name})")
 
 
-async def get_ai_enabled(user_id: int) -> bool:
-    """Check if AI analysis is enabled for a user. Default: True."""
+async def get_user_rss(telegram_id: int) -> Optional[str]:
+    """Get RSS URL for a user."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT ai_enabled FROM user_settings WHERE user_id = ?",
-            (user_id,)
+            "SELECT rss_url FROM users WHERE telegram_id = ?",
+            (telegram_id,)
         ) as cursor:
             row = await cursor.fetchone()
-        return bool(row[0]) if row else True  # Default: AI on
-
-
-async def set_ai_enabled(user_id: int, enabled: bool) -> None:
-    """Set AI analysis on/off for a user."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
-            INSERT INTO user_settings (user_id, ai_enabled)
-            VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET ai_enabled = excluded.ai_enabled
-            """,
-            (user_id, int(enabled))
-        )
-        await db.commit()
-        logger.info(f"AI {'enabled' if enabled else 'disabled'} for user {user_id}")
-
-
-async def get_user_data(telegram_id: int) -> Optional[dict]:
-    """Get user info with all associated CVs."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Get user info
-        async with db.execute(
-            "SELECT telegram_id, name, rss_url FROM users WHERE telegram_id = ?",
-            (telegram_id,)
-        ) as cursor:
-            user_row = await cursor.fetchone()
-            
-        if not user_row:
-            return None
-        
-        # Get all CVs for user
-        async with db.execute(
-            "SELECT label, content FROM cv_slots WHERE user_id = ?",
-            (telegram_id,)
-        ) as cursor:
-            cv_rows = await cursor.fetchall()
-        
-        return {
-            "telegram_id": user_row["telegram_id"],
-            "name": user_row["name"],
-            "rss_url": user_row["rss_url"],
-            "cvs": {row["label"]: row["content"] for row in cv_rows}
-        }
+        return row[0] if row else None
 
 
 # ============== RSS OPERATIONS ==============
@@ -173,49 +107,6 @@ async def delete_rss(telegram_id: int) -> None:
         logger.info(f"RSS URL deleted for user {telegram_id}")
 
 
-# ============== CV OPERATIONS ==============
-
-async def add_cv(telegram_id: int, label: str, content: str) -> None:
-    """Add or update a CV slot for a user."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
-            INSERT INTO cv_slots (user_id, label, content)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id, label) DO UPDATE SET content = excluded.content
-            """,
-            (telegram_id, label.upper(), content)
-        )
-        await db.commit()
-        logger.info(f"CV '{label.upper()}' added/updated for user {telegram_id}")
-
-
-async def delete_cv(telegram_id: int, label: str) -> bool:
-    """Delete a specific CV slot. Returns True if deleted, False if not found."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "DELETE FROM cv_slots WHERE user_id = ? AND label = ?",
-            (telegram_id, label.upper())
-        )
-        await db.commit()
-        deleted = cursor.rowcount > 0
-        if deleted:
-            logger.info(f"CV '{label.upper()}' deleted for user {telegram_id}")
-        return deleted
-
-
-async def get_all_cvs(telegram_id: int) -> dict:
-    """Get all CV slots for a user as {label: content} dict."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT label, content FROM cv_slots WHERE user_id = ?",
-            (telegram_id,)
-        ) as cursor:
-            rows = await cursor.fetchall()
-        return {row["label"]: row["content"] for row in rows}
-
-
 # ============== JOB OPERATIONS ==============
 
 async def check_job_processed(job_hash: str, user_id: int) -> bool:
@@ -228,23 +119,15 @@ async def check_job_processed(job_hash: str, user_id: int) -> bool:
             return await cursor.fetchone() is not None
 
 
-async def log_processed_job(
-    job_hash: str, 
-    user_id: int, 
-    score: int, 
-    matching_label: str
-) -> None:
-    """Log a processed job with its score and matching CV label."""
+async def log_processed_job(job_hash: str, user_id: int) -> None:
+    """Log a processed job for deduplication."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            """
-            INSERT OR IGNORE INTO processed_jobs (job_hash, user_id, score, matching_label)
-            VALUES (?, ?, ?, ?)
-            """,
-            (job_hash, user_id, score, matching_label)
+            "INSERT OR IGNORE INTO processed_jobs (job_hash, user_id) VALUES (?, ?)",
+            (job_hash, user_id)
         )
         await db.commit()
-        logger.info(f"Job logged: hash={job_hash[:8]}... user={user_id} score={score}")
+        logger.debug(f"Job logged: hash={job_hash[:8]}... user={user_id}")
 
 
 async def get_jobs_last_24h(user_id: int) -> list:
@@ -254,7 +137,7 @@ async def get_jobs_last_24h(user_id: int) -> list:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """
-            SELECT job_hash, score, matching_label, found_at 
+            SELECT job_hash, found_at 
             FROM processed_jobs 
             WHERE user_id = ? AND found_at >= ?
             ORDER BY found_at DESC
@@ -274,9 +157,6 @@ async def get_db_stats() -> dict:
         
         async with db.execute("SELECT COUNT(*) FROM users") as cursor:
             stats["users"] = (await cursor.fetchone())[0]
-        
-        async with db.execute("SELECT COUNT(*) FROM cv_slots") as cursor:
-            stats["cv_slots"] = (await cursor.fetchone())[0]
         
         async with db.execute("SELECT COUNT(*) FROM processed_jobs") as cursor:
             stats["processed_jobs"] = (await cursor.fetchone())[0]
