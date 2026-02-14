@@ -269,74 +269,131 @@ async def _scrape_glints_browser(url: str) -> list[dict]:
     """
     Scrape Glints using Playwright browser automation.
     Glints blocks static requests (httpx) with a firewall.
+    Uses multiple selector strategies to handle DOM changes.
     """
     jobs = []
     logger.info(f"Glints Browser: scraping URL: {url}")
     
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent=HEADERS["User-Agent"]
-        )
-        page = await context.new_page()
-        
-        try:
-            # Navigate to URL
-            await page.goto(url, wait_until="networkidle", timeout=60000)
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=HEADERS["User-Agent"],
+                viewport={"width": 1280, "height": 800}
+            )
+            page = await context.new_page()
             
-            # Wait for job cards to appear
-            await page.wait_for_selector("div[data-testid='job-card']", timeout=60000)
-            
-            # Extract content
-            content = await page.content()
-            soup = BeautifulSoup(content, "lxml")
-            
-            job_cards = soup.select("div[data-testid='job-card'], .job-card, a[href*='/opportunities/']")
-            
-            for card in job_cards:
-                try:
-                    title_elem = card.select_one("h2, h3, .job-title, [data-testid='job-title']")
-                    title = title_elem.get_text(strip=True) if title_elem else ""
-                    
-                    if not title and card.name == "a":
-                        title = card.get_text(strip=True)[:100]
-                    
-                    if not _is_valid_title(title):
+            try:
+                # Navigate to URL
+                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                
+                # Wait for SPA to render
+                await asyncio.sleep(5)
+                
+                # Try multiple selectors to find job cards
+                selectors_to_try = [
+                    "div[data-testid='job-card']",
+                    "[class*='JobCard']",
+                    "[class*='jobCard']",
+                    "[class*='job-card']",
+                    "[class*='CompactOpportunityCard']",
+                    "[class*='OpportunityCard']",
+                    "a[href*='/opportunities/jobs/']",
+                ]
+                
+                found_selector = None
+                for sel in selectors_to_try:
+                    try:
+                        await page.wait_for_selector(sel, timeout=5000)
+                        found_selector = sel
+                        logger.info(f"Glints: found elements with selector: {sel}")
+                        break
+                    except:
                         continue
-                    
-                    company = "Unknown Company"
-                    for sel in ["[data-testid='company-name']", ".company-name", "span"]:
-                        elem = card.select_one(sel)
-                        if elem:
-                            text = elem.get_text(strip=True)
-                            if text and text != title and len(text) < 80:
-                                company = text
+                
+                # Extract content
+                content = await page.content()
+                soup = BeautifulSoup(content, "lxml")
+                
+                if not found_selector:
+                    page_title = await page.title()
+                    all_links = soup.select("a[href*='/opportunities/']")
+                    logger.warning(
+                        f"Glints: no job cards found with known selectors. "
+                        f"Page title: '{page_title}', HTML len: {len(content)}, "
+                        f"opportunity links: {len(all_links)}"
+                    )
+                    if not all_links:
+                        await browser.close()
+                        return jobs
+                
+                # Find all links to individual job pages
+                opp_links = soup.select("a[href*='/opportunities/jobs/']")
+                logger.info(f"Glints: found {len(opp_links)} opportunity job links")
+                
+                seen_links = set()
+                for link_elem in opp_links:
+                    try:
+                        href = link_elem.get("href", "")
+                        if not href or href in seen_links:
+                            continue
+                        
+                        # Skip navigation/filter links
+                        if "/explore" in href and "?" in href:
+                            continue
+                        
+                        seen_links.add(href)
+                        
+                        if not href.startswith("http"):
+                            href = f"https://glints.com{href}"
+                        
+                        # Get title from link or children
+                        title = ""
+                        title_elem = link_elem.select_one("h2, h3, h4, [class*='Title'], [class*='title']")
+                        if title_elem:
+                            title = title_elem.get_text(strip=True)
+                        if not title:
+                            title = link_elem.get_text(strip=True)[:100]
+                        
+                        if not _is_valid_title(title):
+                            continue
+                        
+                        # Find company from parent elements
+                        company = "Unknown Company"
+                        parent = link_elem.parent
+                        for _ in range(5):
+                            if parent is None:
                                 break
-                    
-                    link_elem = card if card.name == "a" else card.select_one("a[href*='/opportunities/']")
-                    link = link_elem.get("href", "") if link_elem else ""
-                    
-                    if link and not link.startswith("http"):
-                        link = f"https://glints.com{link}"
-                    
-                    if not link:
+                            candidates = parent.select(
+                                "[class*='Company'], [class*='company'], "
+                                "[data-testid*='company'], span"
+                            )
+                            for cc in candidates:
+                                text = cc.get_text(strip=True)
+                                if text and text != title and 2 < len(text) < 80:
+                                    company = text
+                                    break
+                            if company != "Unknown Company":
+                                break
+                            parent = parent.parent
+                        
+                        jobs.append({
+                            "title": title,
+                            "company": company,
+                            "link": href,
+                            "description": "",
+                            "hash": _generate_job_hash(href)
+                        })
+                    except Exception as e:
+                        logger.debug(f"Error parsing Glints link: {e}")
                         continue
-                    
-                    jobs.append({
-                        "title": title,
-                        "company": company,
-                        "link": link,
-                        "description": "",
-                        "hash": _generate_job_hash(link)
-                    })
-                except Exception as e:
-                    logger.debug(f"Error parsing Glints card in browser: {e}")
-                    continue
-                    
-        except Exception as e:
-            logger.error(f"Glints Browser scraping failed: {e}")
-        finally:
-            await browser.close()
+                        
+            except Exception as e:
+                logger.error(f"Glints Browser scraping failed: {e}")
+            finally:
+                await browser.close()
+    except Exception as e:
+        logger.error(f"Glints Playwright launch failed: {e}")
             
     jobs = _deduplicate_by_link(jobs)
     logger.info(f"Glints Browser: Found {len(jobs)} jobs")
