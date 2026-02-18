@@ -1,79 +1,194 @@
 # Career Scout Agent
 
-Autonomous job scout agent that monitors RSS feeds, analyzes job-CV fit using AI, and sends Telegram notifications for matching opportunities.
+Telegram bot that automatically scrapes job listings from multiple platforms and sends real-time notifications. Supports scheduled hourly scans with multi-user rotation.
 
 ## Features
 
-- Multi-CV support with custom labels
-- RSS feed monitoring (via RSS-Bridge)
-- AI-powered job-CV matching with 3-tier model fallback
-- Telegram bot interface with whitelist security
-- Scheduled hourly scans with user rotation
+- **Multi-platform scraping** — Kalibrr, LinkedIn, Glints, Dealls, and generic sites
+- **RSS feed monitoring** via RSS-Bridge (self-hosted)
+- **URL monitoring** — track specific search result pages for new listings
+- **Scheduled hourly scans** with user rotation (even hours / odd hours)
+- **Telegram bot interface** with whitelist security
+- **Deduplication** — only notifies for new job listings
+
+## Supported Platforms
+
+| Platform | Method | Notes |
+|----------|--------|-------|
+| Kalibrr | Internal JSON API | Fast, reliable |
+| LinkedIn | HTML scraping | Public job listings only |
+| Glints | Playwright browser | Requires Chromium (Glints blocks non-browser requests) |
+| Dealls | HTML scraping | |
+| Others | Generic HTML parser | Best-effort extraction |
+
+## Prerequisites
+
+- Python 3.10+
+- A Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
+- RSS-Bridge instance (self-hosted, for RSS feed support)
+- Chromium browser (for Glints scraping, installed via Playwright)
 
 ## Setup
 
-1. Clone the repository:
+### 1. Clone and install
+
 ```bash
-git clone https://github.com/YOUR_USERNAME/career-scout-agent.git
+git clone https://github.com/zidanlf/career-scout-agent.git
 cd career-scout-agent
-```
-
-2. Create virtual environment:
-```bash
 python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # Linux/Mac
-```
-
-3. Install dependencies:
-```bash
+source venv/bin/activate        # Linux/Mac
+# venv\Scripts\activate         # Windows
 pip install -r requirements.txt
+playwright install chromium
 ```
 
-4. Create `.env` file with your credentials:
+On Linux servers, also install system dependencies:
+
+```bash
+sudo playwright install-deps chromium
+```
+
+### 2. Configure environment
+
+Create a `.env` file in the project root:
+
 ```env
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-OPENROUTER_API_KEY=your_openrouter_api_key
+# Telegram Bot
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+
+# Authorized User IDs (whitelist)
 ZIDAN_ID=your_telegram_user_id
 PARTNER_ID=partner_telegram_user_id
+
+# RSS-Bridge (optional, for /setrss)
 RSS_BRIDGE_URL=http://localhost:3000
 ```
 
-5. Run the bot:
+### 3. Run
+
 ```bash
 python main.py
 ```
 
 ## Bot Commands
 
+### RSS Feed
+
 | Command | Description |
 |---------|-------------|
 | `/start` | Register and show help |
-| `/addcv <label> <text>` | Add CV via text |
-| `/delcv <label>` | Delete a CV |
-| `/listcv` | List all CVs |
 | `/setrss <url>` | Set RSS feed URL |
 | `/delrss` | Remove RSS feed |
-| `/scan <label> <job_text>` | Manual job analysis |
-| `/scanrss` | Scan RSS feed for jobs |
-| `/report` | 24-hour summary |
-| `/status` | System status |
+| `/scanrss` | Scan RSS feed now |
 
-**Upload CV via File:** Send a `.txt` file, then provide the label when prompted.
+### URL Monitoring
+
+| Command | Description |
+|---------|-------------|
+| `/monitor <url> <tag>` | Add a URL to monitor |
+| `/listmonitor` | List all monitored URLs |
+| `/delmonitor <id>` | Remove a monitored URL |
+| `/scanmonitor` | Scan all monitored URLs now |
+
+### Info & Utilities
+
+| Command | Description |
+|---------|-------------|
+| `/next` | Show next scan schedule |
+| `/report` | 24-hour job summary |
+| `/status` | System status |
+| `/clearjobs` | Reset job history (re-discover all jobs) |
+
+## Notification Format
+
+```
+Job Found in Glints!
+
+Data Engineer
+PT Tokopedia
+
+Apply Here
+```
+
+Each notification includes the platform name, job title, company name, and a clickable apply link.
+
+## Scheduling
+
+The bot scans automatically every hour with user rotation:
+
+- **Even hours** (00, 02, 04, ...) → ZIDAN's RSS + monitored URLs
+- **Odd hours** (01, 03, 05, ...) → PARTNER's RSS + monitored URLs
+
+Use `/next` to check the upcoming scan schedule.
 
 ## Project Structure
 
 ```
 career-scout-agent/
-├── main.py              # Entry point & orchestrator
-├── requirements.txt     # Dependencies
-├── .env                 # Credentials (not in git!)
+├── main.py                     # Entry point, scheduler, orchestrator
+├── requirements.txt            # Python dependencies
+├── .env                        # Credentials (not in git)
+├── data/
+│   └── scout.db                # SQLite database
+├── logs/
+│   └── scout.log               # Application logs
 └── src/
-    ├── database/        # SQLite database manager
-    ├── scrapers/        # RSS parser
-    ├── ai/              # OpenRouter AI analyzer
-    └── notifications/   # Telegram bot handler
+    ├── database/
+    │   └── db_manager.py       # SQLite operations (users, jobs, URLs)
+    ├── scrapers/
+    │   ├── rss_parser.py       # RSS feed parser
+    │   └── web_scraper.py      # Multi-platform job scraper
+    └── notifications/
+        └── bot_handler.py      # Telegram bot commands & handlers
 ```
+
+## Database Tables
+
+| Table | Purpose |
+|-------|---------|
+| `users` | Registered users with RSS URL |
+| `processed_jobs` | Deduplication tracking (job_hash + user_id) |
+| `monitored_urls` | Saved search URLs for periodic scanning |
+
+## Deployment (systemd)
+
+Create `/etc/systemd/system/career-scout.service`:
+
+```ini
+[Unit]
+Description=Career Scout Agent
+After=network.target
+
+[Service]
+Type=simple
+User=your_user
+WorkingDirectory=/home/your_user/career-scout-agent
+ExecStart=/home/your_user/career-scout-agent/venv/bin/python main.py
+Restart=always
+RestartSec=10
+Environment=PATH=/home/your_user/career-scout-agent/venv/bin:/usr/bin
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable career-scout
+sudo systemctl start career-scout
+```
+
+## Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `python-telegram-bot` | Telegram Bot API |
+| `aiosqlite` | Async SQLite database |
+| `httpx` | HTTP client for API/HTML scraping |
+| `beautifulsoup4` | HTML parsing |
+| `lxml` | Fast HTML parser backend |
+| `playwright` | Browser automation (Glints) |
+| `python-dotenv` | Environment variable loading |
 
 ## License
 
