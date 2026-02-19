@@ -58,7 +58,7 @@ TELEGRAM_BOT_TOKEN=your_bot_token_here
 
 # Authorized User IDs (whitelist)
 ZIDAN_ID=your_telegram_user_id
-PARTNER_ID=partner_telegram_user_id
+OTHER_USER_ID=other_user_telegram_id
 
 # RSS-Bridge (optional, for /setrss)
 RSS_BRIDGE_URL=http://localhost:3000
@@ -116,8 +116,8 @@ Each notification includes the platform name, job title, company name, and a cli
 
 The bot scans automatically every hour with user rotation:
 
-- **Even hours** (00, 02, 04, ...) → ZIDAN's RSS + monitored URLs
-- **Odd hours** (01, 03, 05, ...) → PARTNER's RSS + monitored URLs
+- **Even hours** (00, 02, 04, ...) → User A's RSS + monitored URLs
+- **Odd hours** (01, 03, 05, ...) → User B's RSS + monitored URLs
 
 Use `/next` to check the upcoming scan schedule.
 
