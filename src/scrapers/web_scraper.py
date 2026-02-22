@@ -1,7 +1,7 @@
 """
 Web Scraper for Career Scout Agent
 Scrapes job listings from job search result pages.
-Supports Kalibrr, LinkedIn, Glints, and Dealls.
+Supports LinkedIn, Jobstreet, and Dealls.
 """
 
 import hashlib
@@ -10,11 +10,10 @@ import logging
 import re
 import asyncio
 from typing import Optional
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode
 
 import httpx
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -59,12 +58,10 @@ def _detect_platform(url: str) -> str:
     """Detect job platform from URL."""
     domain = urlparse(url).netloc.lower()
     
-    if "kalibrr" in domain:
-        return "kalibrr"
-    elif "linkedin" in domain:
+    if "linkedin" in domain:
         return "linkedin"
-    elif "glints" in domain:
-        return "glints"
+    elif "jobstreet" in domain:
+        return "jobstreet"
     elif "dealls" in domain:
         return "dealls"
     else:
@@ -110,102 +107,7 @@ def _deduplicate_by_link(jobs: list[dict]) -> list[dict]:
     return list(link_map.values())
 
 
-async def _scrape_kalibrr_api(url: str) -> list[dict]:
-    """
-    Scrape Kalibrr using their internal JSON API.
-    Kalibrr is a fully client-side rendered SPA, so HTML scraping returns nothing.
-    API endpoint: /kjs/job_board/search
-    """
-    jobs = []
-    
-    # Extract search keyword from URL
-    parsed = urlparse(url)
-    path_parts = parsed.path.strip("/").split("/")
-    
-    # URL format: /id-ID/home/l/Central-Jakarta/l/East-Jakarta/l/South-Jakarta/l/Bekasi/te/Data-Engineer
-    # We look for the part after '/te/'
-    keyword = ""
-    try:
-        if "/te/" in parsed.path:
-            keyword = parsed.path.split("/te/")[-1].replace("-", " ")
-        elif len(path_parts) >= 3:
-            keyword = path_parts[2].replace("+", " ").replace("-", " ")
-    except Exception:
-        pass
-    
-    if not keyword:
-        # Try query params
-        params = parse_qs(parsed.query)
-        keyword = params.get("keyword", params.get("q", [""]))[0]
-    
-    if not keyword:
-        logger.warning(f"Could not extract keyword from Kalibrr URL: {url}")
-        keyword = "engineer"
-    
-    # Use the same domain as the input URL for the API
-    base_domain = f"{parsed.scheme}://{parsed.netloc}"
-    api_url = f"{base_domain}/kjs/job_board/search?keyword={keyword}&limit=15&offset=0"
-    
-    try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            response = await client.get(api_url, headers={
-                "User-Agent": HEADERS["User-Agent"],
-                "Accept": "application/json",
-            })
-            response.raise_for_status()
-            data = response.json()
-    except Exception as e:
-        logger.error(f"Kalibrr API request failed: {e}")
-        return []
-    
-    job_list = data.get("jobs", [])
-    logger.info(f"Kalibrr API returned {len(job_list)} jobs (total: {data.get('count', '?')})")
-    
-    for job_data in job_list:
-        try:
-            title = job_data.get("name", "")
-            
-            if not _is_valid_title(title):
-                continue
-            
-            company = job_data.get("company_name", "Unknown Company")
-            
-            # Build link from company code + job id + slug
-            company_data = job_data.get("company", {})
-            company_code = company_data.get("code", "") if isinstance(company_data, dict) else ""
-            job_id = job_data.get("id", "")
-            slug = job_data.get("slug", "")
-            
-            if company_code and job_id:
-                link = f"https://www.kalibrr.com/c/{company_code}/jobs/{job_id}/{slug}"
-            elif job_id:
-                link = f"https://www.kalibrr.com/c/jobs/{job_id}"
-            else:
-                continue
-            
-            # Strip HTML from description
-            desc_raw = job_data.get("description", "")
-            if desc_raw and "<" in desc_raw:
-                desc_soup = BeautifulSoup(desc_raw, "lxml")
-                description = desc_soup.get_text(strip=True)[:500]
-            else:
-                description = str(desc_raw)[:500]
-            
-            jobs.append({
-                "title": title,
-                "company": company,
-                "link": link,
-                "description": description,
-                "hash": _generate_job_hash(link)
-            })
-            
-        except Exception as e:
-            logger.debug(f"Error parsing Kalibrr job: {e}")
-            continue
-    
-    jobs = _deduplicate_by_link(jobs)
-    logger.info(f"Kalibrr: Found {len(jobs)} valid jobs")
-    return jobs
+# ============== PLATFORM SCRAPERS ==============
 
 
 def _parse_linkedin(html: str, base_url: str) -> list[dict]:
@@ -265,230 +167,111 @@ def _parse_linkedin(html: str, base_url: str) -> list[dict]:
     return jobs
 
 
-async def _scrape_glints_browser(url: str) -> list[dict]:
+async def _scrape_jobstreet_api(url: str) -> list[dict]:
     """
-    Scrape Glints using Playwright browser automation.
-    Glints blocks static requests (httpx) with a firewall.
-    Uses multiple selector strategies to handle DOM changes.
-    """
-    jobs = []
-    logger.info(f"Glints Browser: scraping URL: {url}")
-    
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent=HEADERS["User-Agent"],
-                viewport={"width": 1280, "height": 800}
-            )
-            page = await context.new_page()
-            
-            try:
-                # Navigate to URL
-                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                
-                # Wait for SPA to render
-                await asyncio.sleep(5)
-                
-                # Try multiple selectors to find job cards
-                selectors_to_try = [
-                    "div[data-testid='job-card']",
-                    "[class*='JobCard']",
-                    "[class*='jobCard']",
-                    "[class*='job-card']",
-                    "[class*='CompactOpportunityCard']",
-                    "[class*='OpportunityCard']",
-                    "a[href*='/opportunities/jobs/']",
-                ]
-                
-                found_selector = None
-                for sel in selectors_to_try:
-                    try:
-                        await page.wait_for_selector(sel, timeout=5000)
-                        found_selector = sel
-                        logger.info(f"Glints: found elements with selector: {sel}")
-                        break
-                    except:
-                        continue
-                
-                # Extract content
-                content = await page.content()
-                soup = BeautifulSoup(content, "lxml")
-                
-                if not found_selector:
-                    page_title = await page.title()
-                    all_links = soup.select("a[href*='/opportunities/']")
-                    logger.warning(
-                        f"Glints: no job cards found with known selectors. "
-                        f"Page title: '{page_title}', HTML len: {len(content)}, "
-                        f"opportunity links: {len(all_links)}"
-                    )
-                    if not all_links:
-                        await browser.close()
-                        return jobs
-                
-                # Find all links to individual job pages
-                opp_links = soup.select("a[href*='/opportunities/jobs/']")
-                logger.info(f"Glints: found {len(opp_links)} opportunity job links")
-                
-                seen_links = set()
-                for link_elem in opp_links:
-                    try:
-                        href = link_elem.get("href", "")
-                        if not href or href in seen_links:
-                            continue
-                        
-                        # Skip navigation/filter links
-                        if "/explore" in href and "?" in href:
-                            continue
-                        
-                        seen_links.add(href)
-                        
-                        if not href.startswith("http"):
-                            href = f"https://glints.com{href}"
-                        
-                        # Get title from link or children
-                        title = ""
-                        title_elem = link_elem.select_one("h2, h3, h4, [class*='Title'], [class*='title']")
-                        if title_elem:
-                            title = title_elem.get_text(strip=True)
-                        if not title:
-                            title = link_elem.get_text(strip=True)[:100]
-                        
-                        if not _is_valid_title(title):
-                            continue
-                        
-                        # Find company from parent elements
-                        company = "Unknown Company"
-                        parent = link_elem.parent
-                        for _ in range(5):
-                            if parent is None:
-                                break
-                            candidates = parent.select(
-                                "[class*='Company'], [class*='company'], "
-                                "[data-testid*='company'], span"
-                            )
-                            for cc in candidates:
-                                text = cc.get_text(strip=True)
-                                # Skip salary-like text
-                                if re.search(r'(Rp|IDR|\d+\s*jt|\d+\s*rb|\$)', text, re.IGNORECASE):
-                                    continue
-                                if text and text != title and 2 < len(text) < 80:
-                                    company = text
-                                    break
-                            if company != "Unknown Company":
-                                break
-                            parent = parent.parent
-                        
-                        jobs.append({
-                            "title": title,
-                            "company": company,
-                            "link": href,
-                            "description": "",
-                            "hash": _generate_job_hash(href)
-                        })
-                    except Exception as e:
-                        logger.debug(f"Error parsing Glints link: {e}")
-                        continue
-                        
-            except Exception as e:
-                logger.error(f"Glints Browser scraping failed: {e}")
-            finally:
-                await browser.close()
-    except Exception as e:
-        logger.error(f"Glints Playwright launch failed: {e}")
-            
-    jobs = _deduplicate_by_link(jobs)
-    logger.info(f"Glints Browser: Found {len(jobs)} jobs")
-    return jobs
-
-
-async def _scrape_glints_api(url: str) -> list[dict]:
-    """
-    Scrape Glints using their internal API.
-    Glints blocks all non-browser requests with a firewall,
-    but their API may be accessible with proper headers.
+    Scrape Jobstreet using the SEEK GraphQL API.
+    Jobstreet (part of SEEK Group) uses graphql.seek.com for job search.
+    This is a lightweight HTTP approach — no browser required.
     """
     jobs = []
     
-    # Extract keyword from URL
+    # Extract search keyword from the URL
     parsed = urlparse(url)
     params = parse_qs(parsed.query)
-    keyword = params.get("keyword", params.get("q", [""]))[0]
+    
+    # Jobstreet URL formats:
+    # /id/data-engineer-jobs  (keyword in path)
+    # /id/jobs?q=data+engineer  (keyword in query)
+    keyword = ""
+    if params.get("q"):
+        keyword = params["q"][0]
+    elif params.get("keyword"):
+        keyword = params["keyword"][0]
+    else:
+        # Extract from path: /id/data-engineer-jobs -> data engineer
+        path = parsed.path.rstrip("/")
+        # e.g. /id/data-engineer-jobs -> data-engineer
+        path_parts = path.split("/")
+        for part in path_parts:
+            if part.endswith("-jobs") or part.endswith("-job"):
+                keyword = part.replace("-jobs", "").replace("-job", "").replace("-", " ")
+                break
     
     if not keyword:
-        # Try extracting from path
-        path = parsed.path
-        if "/explore" in path:
-            keyword = "engineer"
+        keyword = "engineer"  # default fallback
     
-    logger.info(f"Glints API: searching for '{keyword}'")
+    logger.info(f"Jobstreet API: searching for '{keyword}'")
     
-    # Glints uses a GraphQL-like API internally
-    api_url = "https://glints.com/api/v2/opportunities"
-    api_params = {
-        "keyword": keyword,
-        "limit": "15",
-        "offset": "0",
-        "country": "ID",
+    # Jobstreet uses SEEK's search API
+    # Try the JSON search endpoint first
+    search_url = f"https://www.jobstreet.co.id/api/chalice-search/v4/search"
+    search_params = {
+        "siteKey": "ID-Main",
+        "sourcesystem": "houston",
+        "userqueryid": "",
+        "page": "1",
+        "seekSelectAllPages": "true",
+        "keywords": keyword,
+        "pageSize": "20",
     }
     
-    # Try multiple API strategies
-    api_attempts = [
-        ("v2", api_url, api_params),
-        ("explore", f"https://glints.com/api/v1/opportunities", api_params),
-    ]
+    # Add location if present in URL
+    location = params.get("where", params.get("location", [None]))[0]
+    if location:
+        search_params["where"] = location
     
-    for attempt_name, api_ep, api_p in api_attempts:
-        try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                response = await client.get(api_ep, params=api_p, headers={
-                    "User-Agent": HEADERS["User-Agent"],
-                    "Accept": "application/json",
-                    "Referer": "https://glints.com/id/opportunities/jobs/explore",
-                    "Origin": "https://glints.com",
-                })
-                
-                if response.status_code == 403:
-                    logger.warning(f"Glints API ({attempt_name}): blocked by firewall (403)")
-                    continue
-                
+    api_headers = {
+        "User-Agent": HEADERS["User-Agent"],
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": url,
+        "Origin": "https://www.jobstreet.co.id",
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(search_url, params=search_params, headers=api_headers)
+            
+            if response.status_code == 403:
+                logger.warning(f"Jobstreet API: blocked (403), trying alternative...")
+            else:
                 response.raise_for_status()
                 data = response.json()
                 
-                # Parse response
-                if isinstance(data, dict):
-                    job_list = data.get("data", data.get("jobs", data.get("opportunities", [])))
-                elif isinstance(data, list):
-                    job_list = data
-                else:
-                    continue
+                job_list = data.get("data", [])
+                if not job_list and isinstance(data, dict):
+                    job_list = data.get("jobs", data.get("results", []))
                 
                 for job_data in job_list:
                     try:
-                        title = job_data.get("title") or job_data.get("name", "")
+                        title = job_data.get("title", job_data.get("jobTitle", ""))
                         if not _is_valid_title(title):
                             continue
                         
-                        company_data = job_data.get("company", {})
-                        if isinstance(company_data, dict):
-                            company = company_data.get("name", "Unknown Company")
+                        # Company name
+                        advertiser = job_data.get("advertiser", {})
+                        if isinstance(advertiser, dict):
+                            company = advertiser.get("description", "Unknown Company")
                         else:
-                            company = job_data.get("companyName", str(company_data) if company_data else "Unknown Company")
+                            company = job_data.get("companyName", str(advertiser) if advertiser else "Unknown Company")
                         
-                        link = job_data.get("url") or job_data.get("link", "")
-                        if not link:
-                            slug = job_data.get("slug") or job_data.get("id", "")
-                            if slug:
-                                link = f"https://glints.com/id/opportunities/jobs/{slug}"
+                        if not company or company == "Unknown Company":
+                            company = job_data.get("company", job_data.get("companyName", "Unknown Company"))
+                        
+                        # Job link
+                        job_id = job_data.get("id", job_data.get("jobId", ""))
+                        link = job_data.get("listingUrl", job_data.get("url", ""))
+                        
+                        if not link and job_id:
+                            link = f"https://www.jobstreet.co.id/id/job/{job_id}"
                         
                         if link and not link.startswith("http"):
-                            link = f"https://glints.com{link}"
+                            link = f"https://www.jobstreet.co.id{link}"
                         
                         if not link:
                             continue
                         
-                        description = str(job_data.get("description", ""))[:500]
+                        description = job_data.get("teaser", job_data.get("description", ""))[:500]
                         
                         jobs.append({
                             "title": title,
@@ -498,25 +281,217 @@ async def _scrape_glints_api(url: str) -> list[dict]:
                             "hash": _generate_job_hash(link)
                         })
                     except Exception as e:
-                        logger.debug(f"Error parsing Glints job: {e}")
+                        logger.debug(f"Error parsing Jobstreet job: {e}")
                         continue
                 
                 if jobs:
-                    break
-                    
-        except Exception as e:
-            logger.warning(f"Glints API ({attempt_name}) failed: {e}")
-            continue
+                    jobs = _deduplicate_by_link(jobs)
+                    logger.info(f"Jobstreet API: Found {len(jobs)} jobs")
+                    return jobs
+    except Exception as e:
+        logger.warning(f"Jobstreet search API failed: {e}")
+    
+    # Fallback: try fetching the HTML page directly
+    logger.info("Jobstreet: API failed, trying HTML scraping fallback...")
+    html = await _fetch_page(url)
+    if html:
+        jobs = _parse_jobstreet_html(html, url)
     
     if not jobs:
-        logger.warning(
-            "Glints: All API attempts failed. "
-            "Glints blocks non-browser requests with a firewall. "
-            "Consider using Selenium/Playwright for Glints scraping."
-        )
+        logger.warning(f"Jobstreet: all scraping methods failed for {url}")
+    
+    return jobs
+
+
+def _parse_jobstreet_html(html: str, base_url: str) -> list[dict]:
+    """
+    Parse Jobstreet HTML page as fallback.
+    Jobstreet renders some job data in JSON-LD and embedded scripts.
+    """
+    jobs = []
+    soup = BeautifulSoup(html, "lxml")
+    
+    # Strategy 1: Parse JSON-LD structured data
+    for script in soup.select('script[type="application/ld+json"]'):
+        try:
+            data = json.loads(script.string)
+            if isinstance(data, dict) and data.get("@type") == "ItemList":
+                for item in data.get("itemListElement", []):
+                    job_data = item.get("item", item)
+                    title = job_data.get("title", "")
+                    if not _is_valid_title(title):
+                        continue
+                    
+                    org = job_data.get("hiringOrganization", {})
+                    company = org.get("name", "Unknown Company") if isinstance(org, dict) else "Unknown Company"
+                    link = job_data.get("url", "")
+                    
+                    if link and not link.startswith("http"):
+                        link = f"https://www.jobstreet.co.id{link}"
+                    
+                    if not link:
+                        continue
+                    
+                    description = job_data.get("description", "")[:500]
+                    
+                    jobs.append({
+                        "title": title,
+                        "company": company,
+                        "link": link,
+                        "description": description,
+                        "hash": _generate_job_hash(link)
+                    })
+            elif isinstance(data, list):
+                for job_data in data:
+                    if job_data.get("@type") == "JobPosting":
+                        title = job_data.get("title", "")
+                        if not _is_valid_title(title):
+                            continue
+                        
+                        org = job_data.get("hiringOrganization", {})
+                        company = org.get("name", "Unknown Company") if isinstance(org, dict) else "Unknown Company"
+                        link = job_data.get("url", "")
+                        
+                        if link and not link.startswith("http"):
+                            link = f"https://www.jobstreet.co.id{link}"
+                        
+                        if not link:
+                            continue
+                        
+                        jobs.append({
+                            "title": title,
+                            "company": company,
+                            "link": link,
+                            "description": job_data.get("description", "")[:500],
+                            "hash": _generate_job_hash(link)
+                        })
+        except (json.JSONDecodeError, AttributeError):
+            continue
+    
+    if jobs:
+        jobs = _deduplicate_by_link(jobs)
+        logger.info(f"Jobstreet HTML (JSON-LD): Found {len(jobs)} jobs")
+        return jobs
+    
+    # Strategy 2: Parse embedded __NEXT_DATA__ (Next.js)
+    next_data_script = soup.select_one('script#__NEXT_DATA__')
+    if next_data_script and next_data_script.string:
+        try:
+            next_data = json.loads(next_data_script.string)
+            # Navigate the Next.js data structure
+            props = next_data.get("props", {}).get("pageProps", {})
+            search_results = props.get("searchResults", props.get("jobs", props.get("data", {})))
+            
+            if isinstance(search_results, dict):
+                job_list = search_results.get("data", search_results.get("jobs", []))
+            elif isinstance(search_results, list):
+                job_list = search_results
+            else:
+                job_list = []
+            
+            for job_data in job_list:
+                try:
+                    title = job_data.get("title", job_data.get("jobTitle", ""))
+                    if not _is_valid_title(title):
+                        continue
+                    
+                    advertiser = job_data.get("advertiser", {})
+                    company = advertiser.get("description", "Unknown Company") if isinstance(advertiser, dict) else "Unknown Company"
+                    if company == "Unknown Company":
+                        company = job_data.get("companyName", job_data.get("company", "Unknown Company"))
+                    
+                    job_id = job_data.get("id", job_data.get("jobId", ""))
+                    link = job_data.get("listingUrl", job_data.get("url", ""))
+                    if not link and job_id:
+                        link = f"https://www.jobstreet.co.id/id/job/{job_id}"
+                    if link and not link.startswith("http"):
+                        link = f"https://www.jobstreet.co.id{link}"
+                    
+                    if not link:
+                        continue
+                    
+                    jobs.append({
+                        "title": title,
+                        "company": company,
+                        "link": link,
+                        "description": job_data.get("teaser", "")[:500],
+                        "hash": _generate_job_hash(link)
+                    })
+                except Exception as e:
+                    logger.debug(f"Error parsing Jobstreet __NEXT_DATA__ job: {e}")
+                    continue
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    
+    if jobs:
+        jobs = _deduplicate_by_link(jobs)
+        logger.info(f"Jobstreet HTML (__NEXT_DATA__): Found {len(jobs)} jobs")
+        return jobs
+    
+    # Strategy 3: Direct HTML card parsing
+    job_cards = soup.select(
+        "article[data-testid*='job-card'], "
+        "[data-automation='jobListing'], "
+        "a[data-automation='jobTitle'], "
+        "a[href*='/id/job/'], "
+        "a[href*='/job/']"
+    )
+    
+    seen_links = set()
+    for card in job_cards:
+        try:
+            if card.name == "a":
+                link = card.get("href", "")
+                title = card.get_text(strip=True)
+            else:
+                title_elem = card.select_one(
+                    "[data-automation='jobTitle'], h3, h2, "
+                    "a[href*='/job/']"
+                )
+                title = title_elem.get_text(strip=True) if title_elem else ""
+                link_elem = card.select_one("a[href*='/job/']")
+                link = link_elem.get("href", "") if link_elem else ""
+            
+            if not _is_valid_title(title):
+                continue
+            
+            if link and not link.startswith("http"):
+                link = f"https://www.jobstreet.co.id{link}"
+            
+            if not link or link in seen_links:
+                continue
+            seen_links.add(link)
+            
+            # Company
+            company = "Unknown Company"
+            parent = card.parent if card.name == "a" else card
+            for _ in range(3):
+                if parent is None:
+                    break
+                comp_elem = parent.select_one(
+                    "[data-automation='jobCompany'], "
+                    "[class*='company'], span"
+                )
+                if comp_elem:
+                    text = comp_elem.get_text(strip=True)
+                    if text and text != title and 2 < len(text) < 80:
+                        company = text
+                        break
+                parent = parent.parent
+            
+            jobs.append({
+                "title": title,
+                "company": company,
+                "link": link,
+                "description": "",
+                "hash": _generate_job_hash(link)
+            })
+        except Exception as e:
+            logger.debug(f"Error parsing Jobstreet HTML card: {e}")
+            continue
     
     jobs = _deduplicate_by_link(jobs)
-    logger.info(f"Glints: Found {len(jobs)} jobs")
+    logger.info(f"Jobstreet HTML: Found {len(jobs)} jobs")
     return jobs
 
 
@@ -697,111 +672,59 @@ async def _fetch_linkedin_detail(job: dict) -> str:
         return ""
 
 
-async def _fetch_kalibrr_detail(job: dict) -> str:
-    """Fetch full job description from Kalibrr API detail endpoint."""
+async def _fetch_jobstreet_detail(job: dict) -> str:
+    """Fetch full job description from Jobstreet detail page."""
     url = job.get("link", "")
     if not url:
         return ""
     
     try:
-        # Extract job ID from URL: /c/{company}/jobs/{id}/{slug}
-        parts = url.rstrip("/").split("/")
-        job_id = None
-        for i, part in enumerate(parts):
-            if part == "jobs" and i + 1 < len(parts):
-                job_id = parts[i + 1]
-                break
-        
-        if not job_id:
+        html = await _fetch_page(url)
+        if not html:
             return ""
         
-        # Use Kalibrr's job detail API
-        api_url = f"https://www.kalibrr.com/kjs/job_board/job/{job_id}"
+        soup = BeautifulSoup(html, "lxml")
         
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            response = await client.get(api_url, headers={
-                "User-Agent": HEADERS["User-Agent"],
-                "Accept": "application/json",
-            })
-            response.raise_for_status()
-            data = response.json()
-        
-        # Extract description from API response
-        desc_raw = data.get("description", "")
-        if desc_raw and "<" in desc_raw:
-            soup = BeautifulSoup(desc_raw, "lxml")
-            description = soup.get_text(separator="\n", strip=True)
-        else:
-            description = str(desc_raw)
-        
-        # Also get qualifications if available
-        quals = data.get("qualifications", "")
-        if quals and "<" in quals:
-            soup = BeautifulSoup(quals, "lxml")
-            quals_text = soup.get_text(separator="\n", strip=True)
-        elif quals:
-            quals_text = str(quals)
-        else:
-            quals_text = ""
-        
-        full_text = description
-        if quals_text:
-            full_text += "\n\nQualifications:\n" + quals_text
-        
-        return full_text[:2000]
-        
-    except Exception as e:
-        logger.debug(f"Error fetching Kalibrr detail for {url[:50]}: {e}")
-        return ""
-
-
-async def _fetch_glints_detail(job: dict) -> str:
-    """Fetch full job description from Glints using Playwright."""
-    url = job.get("link", "")
-    if not url:
-        return ""
-    
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(user_agent=HEADERS["User-Agent"])
-            page = await context.new_page()
-            
+        # Try JSON-LD first
+        for script in soup.select('script[type="application/ld+json"]'):
             try:
-                await page.goto(url, wait_until="networkidle", timeout=30000)
-                
-                # Wait for description content
-                desc_selectors = [
-                    "[data-testid='job-description']",
-                    ".job-description",
-                    ".ql-editor",
-                    "div[class*='Description']",
-                ]
-                
-                for selector in desc_selectors:
-                    try:
-                        await page.wait_for_selector(selector, timeout=5000)
-                        break
-                    except:
-                        continue
-                
-                content = await page.content()
-                soup = BeautifulSoup(content, "lxml")
-                
-                for selector in desc_selectors:
-                    elem = soup.select_one(selector)
-                    if elem:
-                        text = elem.get_text(separator="\n", strip=True)
-                        if len(text) > 50:
-                            return text[:2000]
-                
-                return ""
-                
-            finally:
-                await browser.close()
-                
+                data = json.loads(script.string)
+                if isinstance(data, dict) and data.get("@type") == "JobPosting":
+                    desc = data.get("description", "")
+                    if desc and len(desc) > 50:
+                        # Strip HTML tags from description
+                        desc_soup = BeautifulSoup(desc, "lxml")
+                        return desc_soup.get_text(separator="\n", strip=True)[:2000]
+            except (json.JSONDecodeError, AttributeError):
+                continue
+        
+        # Try HTML selectors
+        desc_selectors = [
+            "[data-automation='jobDescription']",
+            "[data-automation='jobAdDetails']",
+            ".job-description",
+            "[class*='jobDescription']",
+            "section[aria-label*='description']",
+        ]
+        
+        for selector in desc_selectors:
+            elem = soup.select_one(selector)
+            if elem:
+                text = elem.get_text(separator="\n", strip=True)
+                if len(text) > 50:
+                    return text[:2000]
+        
+        # Fallback: meta description
+        meta = soup.select_one("meta[name='description']")
+        if meta:
+            content = meta.get("content", "")
+            if len(content) > 50:
+                return content[:2000]
+        
+        return ""
+        
     except Exception as e:
-        logger.debug(f"Error fetching Glints detail for {url[:50]}: {e}")
+        logger.debug(f"Error fetching Jobstreet detail for {url[:50]}: {e}")
         return ""
 
 
@@ -813,8 +736,7 @@ async def _enrich_jobs_with_details(jobs: list[dict], platform: str) -> list[dic
     """
     detail_fetchers = {
         "linkedin": _fetch_linkedin_detail,
-        "kalibrr": _fetch_kalibrr_detail,
-        "glints": _fetch_glints_detail,
+        "jobstreet": _fetch_jobstreet_detail,
     }
     
     fetcher = detail_fetchers.get(platform)
@@ -847,25 +769,18 @@ async def scrape_job_listings(url: str) -> list[dict]:
     After listing scrape, fetches individual detail pages for full descriptions.
     
     Args:
-        url: Job search results URL (Kalibrr, LinkedIn, Glints, Dealls, or other)
+        url: Job search results URL (LinkedIn, Jobstreet, Dealls, or other)
     
     Returns:
-        List of job dicts: {title, company, link, description, hash}
+        List of job dicts: {title, company, link, description, hash, platform}
     """
     logger.info(f"Scraping URL: {url}")
     
     # Detect platform
     platform = _detect_platform(url)
     
-    # SPA platforms: use API or Browser for dynamic content
-    if platform == "kalibrr":
-        jobs = await _scrape_kalibrr_api(url)
-    elif platform == "glints":
-        # Try API first (faster), fall back to browser
-        jobs = await _scrape_glints_api(url)
-        if not jobs:
-            logger.info("Glints API returned 0 jobs, trying browser fallback...")
-            jobs = await _scrape_glints_browser(url)
+    if platform == "jobstreet":
+        jobs = await _scrape_jobstreet_api(url)
     else:
         # HTML-based platforms: fetch page and parse
         html = await _fetch_page(url)

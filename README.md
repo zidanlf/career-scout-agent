@@ -4,7 +4,7 @@ Telegram bot that automatically scrapes job listings from multiple platforms and
 
 ## Features
 
-- **Multi-platform scraping** — Kalibrr, LinkedIn, Glints, Dealls, and generic sites
+- **Multi-platform scraping** — LinkedIn, Jobstreet, Dealls, and generic sites
 - **RSS feed monitoring** via RSS-Bridge (self-hosted)
 - **URL monitoring** — track specific search result pages for new listings
 - **Scheduled hourly scans** with user rotation (even hours / odd hours)
@@ -15,9 +15,8 @@ Telegram bot that automatically scrapes job listings from multiple platforms and
 
 | Platform | Method | Notes |
 |----------|--------|-------|
-| Kalibrr | Internal JSON API | Fast, reliable |
 | LinkedIn | HTML scraping | Public job listings only |
-| Glints | Playwright browser | Requires Chromium (Glints blocks non-browser requests) |
+| Jobstreet | SEEK Search API + HTML fallback | Lightweight, no browser needed |
 | Dealls | HTML scraping | |
 | Others | Generic HTML parser | Best-effort extraction |
 
@@ -26,7 +25,6 @@ Telegram bot that automatically scrapes job listings from multiple platforms and
 - Python 3.10+
 - A Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
 - RSS-Bridge instance (self-hosted, for RSS feed support)
-- Chromium browser (for Glints scraping, installed via Playwright)
 
 ## Setup
 
@@ -39,13 +37,6 @@ python -m venv venv
 source venv/bin/activate        # Linux/Mac
 # venv\Scripts\activate         # Windows
 pip install -r requirements.txt
-playwright install chromium
-```
-
-On Linux servers, also install system dependencies:
-
-```bash
-sudo playwright install-deps chromium
 ```
 
 ### 2. Configure environment
@@ -102,7 +93,7 @@ python main.py
 ## Notification Format
 
 ```
-Job Found in Glints!
+Job Found in Jobstreet!
 
 Data Engineer
 PT Tokopedia
@@ -187,7 +178,6 @@ sudo systemctl start career-scout
 | `httpx` | HTTP client for API/HTML scraping |
 | `beautifulsoup4` | HTML parsing |
 | `lxml` | Fast HTML parser backend |
-| `playwright` | Browser automation (Glints) |
 | `python-dotenv` | Environment variable loading |
 
 ## License
