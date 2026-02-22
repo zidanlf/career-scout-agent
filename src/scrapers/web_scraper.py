@@ -167,149 +167,66 @@ def _parse_linkedin(html: str, base_url: str) -> list[dict]:
     return jobs
 
 
-async def _scrape_jobstreet_api(url: str) -> list[dict]:
+async def _scrape_jobstreet_html(url: str) -> list[dict]:
     """
-    Scrape Jobstreet using the SEEK GraphQL API.
-    Jobstreet (part of SEEK Group) uses graphql.seek.com for job search.
-    This is a lightweight HTTP approach — no browser required.
+    Scrape Jobstreet by fetching HTML with browser-like headers.
+    Jobstreet (id.jobstreet.com) is server-side rendered, so HTML scraping
+    works if using proper headers. No browser/Playwright required.
     """
-    jobs = []
+    logger.info(f"Jobstreet: scraping URL: {url}")
     
-    # Extract search keyword from the URL
-    parsed = urlparse(url)
-    params = parse_qs(parsed.query)
-    
-    # Jobstreet URL formats:
-    # /id/data-engineer-jobs  (keyword in path)
-    # /id/jobs?q=data+engineer  (keyword in query)
-    keyword = ""
-    if params.get("q"):
-        keyword = params["q"][0]
-    elif params.get("keyword"):
-        keyword = params["keyword"][0]
-    else:
-        # Extract from path: /id/data-engineer-jobs -> data engineer
-        path = parsed.path.rstrip("/")
-        # e.g. /id/data-engineer-jobs -> data-engineer
-        path_parts = path.split("/")
-        for part in path_parts:
-            if part.endswith("-jobs") or part.endswith("-job"):
-                keyword = part.replace("-jobs", "").replace("-job", "").replace("-", " ")
-                break
-    
-    if not keyword:
-        keyword = "engineer"  # default fallback
-    
-    logger.info(f"Jobstreet API: searching for '{keyword}'")
-    
-    # Jobstreet uses SEEK's search API
-    # Try the JSON search endpoint first
-    search_url = f"https://www.jobstreet.co.id/api/chalice-search/v4/search"
-    search_params = {
-        "siteKey": "ID-Main",
-        "sourcesystem": "houston",
-        "userqueryid": "",
-        "page": "1",
-        "seekSelectAllPages": "true",
-        "keywords": keyword,
-        "pageSize": "20",
-    }
-    
-    # Add location if present in URL
-    location = params.get("where", params.get("location", [None]))[0]
-    if location:
-        search_params["where"] = location
-    
-    api_headers = {
-        "User-Agent": HEADERS["User-Agent"],
-        "Accept": "application/json, text/plain, */*",
+    # Full browser-like headers to avoid 403
+    jobstreet_headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": url,
-        "Origin": "https://www.jobstreet.co.id",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "max-age=0",
+        "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Linux"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "Connection": "keep-alive",
     }
     
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            response = await client.get(search_url, params=search_params, headers=api_headers)
-            
-            if response.status_code == 403:
-                logger.warning(f"Jobstreet API: blocked (403), trying alternative...")
-            else:
-                response.raise_for_status()
-                data = response.json()
-                
-                job_list = data.get("data", [])
-                if not job_list and isinstance(data, dict):
-                    job_list = data.get("jobs", data.get("results", []))
-                
-                for job_data in job_list:
-                    try:
-                        title = job_data.get("title", job_data.get("jobTitle", ""))
-                        if not _is_valid_title(title):
-                            continue
-                        
-                        # Company name
-                        advertiser = job_data.get("advertiser", {})
-                        if isinstance(advertiser, dict):
-                            company = advertiser.get("description", "Unknown Company")
-                        else:
-                            company = job_data.get("companyName", str(advertiser) if advertiser else "Unknown Company")
-                        
-                        if not company or company == "Unknown Company":
-                            company = job_data.get("company", job_data.get("companyName", "Unknown Company"))
-                        
-                        # Job link
-                        job_id = job_data.get("id", job_data.get("jobId", ""))
-                        link = job_data.get("listingUrl", job_data.get("url", ""))
-                        
-                        if not link and job_id:
-                            link = f"https://www.jobstreet.co.id/id/job/{job_id}"
-                        
-                        if link and not link.startswith("http"):
-                            link = f"https://www.jobstreet.co.id{link}"
-                        
-                        if not link:
-                            continue
-                        
-                        description = job_data.get("teaser", job_data.get("description", ""))[:500]
-                        
-                        jobs.append({
-                            "title": title,
-                            "company": company,
-                            "link": link,
-                            "description": description,
-                            "hash": _generate_job_hash(link)
-                        })
-                    except Exception as e:
-                        logger.debug(f"Error parsing Jobstreet job: {e}")
-                        continue
-                
-                if jobs:
-                    jobs = _deduplicate_by_link(jobs)
-                    logger.info(f"Jobstreet API: Found {len(jobs)} jobs")
-                    return jobs
+            response = await client.get(url, headers=jobstreet_headers)
+            response.raise_for_status()
+            html = response.text
+    except httpx.HTTPStatusError as e:
+        logger.warning(f"Jobstreet HTTP error {e.response.status_code} for: {url}")
+        return []
     except Exception as e:
-        logger.warning(f"Jobstreet search API failed: {e}")
+        logger.error(f"Jobstreet fetch error: {e}")
+        return []
     
-    # Fallback: try fetching the HTML page directly
-    logger.info("Jobstreet: API failed, trying HTML scraping fallback...")
-    html = await _fetch_page(url)
-    if html:
-        jobs = _parse_jobstreet_html(html, url)
+    if not html:
+        return []
+    
+    jobs = _parse_jobstreet_html(html, url)
     
     if not jobs:
-        logger.warning(f"Jobstreet: all scraping methods failed for {url}")
+        logger.warning(f"Jobstreet: no jobs found for {url}")
     
     return jobs
 
 
 def _parse_jobstreet_html(html: str, base_url: str) -> list[dict]:
     """
-    Parse Jobstreet HTML page as fallback.
-    Jobstreet renders some job data in JSON-LD and embedded scripts.
+    Parse Jobstreet HTML page.
+    Tries JSON-LD, __NEXT_DATA__, and direct HTML card parsing.
     """
     jobs = []
     soup = BeautifulSoup(html, "lxml")
+    
+    # Extract base domain from URL (e.g. https://id.jobstreet.com)
+    parsed_base = urlparse(base_url)
+    base_origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
     
     # Strategy 1: Parse JSON-LD structured data
     for script in soup.select('script[type="application/ld+json"]'):
@@ -327,7 +244,7 @@ def _parse_jobstreet_html(html: str, base_url: str) -> list[dict]:
                     link = job_data.get("url", "")
                     
                     if link and not link.startswith("http"):
-                        link = f"https://www.jobstreet.co.id{link}"
+                        link = f"{base_origin}{link}"
                     
                     if not link:
                         continue
@@ -353,7 +270,7 @@ def _parse_jobstreet_html(html: str, base_url: str) -> list[dict]:
                         link = job_data.get("url", "")
                         
                         if link and not link.startswith("http"):
-                            link = f"https://www.jobstreet.co.id{link}"
+                            link = f"{base_origin}{link}"
                         
                         if not link:
                             continue
@@ -403,9 +320,9 @@ def _parse_jobstreet_html(html: str, base_url: str) -> list[dict]:
                     job_id = job_data.get("id", job_data.get("jobId", ""))
                     link = job_data.get("listingUrl", job_data.get("url", ""))
                     if not link and job_id:
-                        link = f"https://www.jobstreet.co.id/id/job/{job_id}"
+                        link = f"{base_origin}/id/job/{job_id}"
                     if link and not link.startswith("http"):
-                        link = f"https://www.jobstreet.co.id{link}"
+                        link = f"{base_origin}{link}"
                     
                     if not link:
                         continue
@@ -456,7 +373,7 @@ def _parse_jobstreet_html(html: str, base_url: str) -> list[dict]:
                 continue
             
             if link and not link.startswith("http"):
-                link = f"https://www.jobstreet.co.id{link}"
+                link = f"{base_origin}{link}"
             
             if not link or link in seen_links:
                 continue
@@ -780,7 +697,7 @@ async def scrape_job_listings(url: str) -> list[dict]:
     platform = _detect_platform(url)
     
     if platform == "jobstreet":
-        jobs = await _scrape_jobstreet_api(url)
+        jobs = await _scrape_jobstreet_html(url)
     else:
         # HTML-based platforms: fetch page and parse
         html = await _fetch_page(url)
