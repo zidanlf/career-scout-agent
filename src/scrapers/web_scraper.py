@@ -15,6 +15,12 @@ from urllib.parse import urlparse, parse_qs, urlencode
 import httpx
 from bs4 import BeautifulSoup
 
+try:
+    from curl_cffi.requests import AsyncSession as CurlAsyncSession
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
+
 # Configure module logger
 logger = logging.getLogger(__name__)
 
@@ -169,49 +175,57 @@ def _parse_linkedin(html: str, base_url: str) -> list[dict]:
 
 async def _scrape_jobstreet_html(url: str) -> list[dict]:
     """
-    Scrape Jobstreet by fetching HTML with browser-like headers.
-    Jobstreet (id.jobstreet.com) is server-side rendered, so HTML scraping
-    works if using proper headers. No browser/Playwright required.
+    Scrape Jobstreet by fetching HTML with TLS fingerprint impersonation.
+    Uses curl_cffi to impersonate Chrome's TLS fingerprint, bypassing
+    Cloudflare anti-bot. Falls back to httpx if curl_cffi unavailable.
     """
     logger.info(f"Jobstreet: scraping URL: {url}")
+    html = None
     
-    # Full browser-like headers to avoid 403
-    jobstreet_headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Cache-Control": "max-age=0",
-        "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Linux"',
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
-        "Connection": "keep-alive",
-    }
+    if HAS_CURL_CFFI:
+        # curl_cffi impersonates Chrome TLS fingerprint
+        try:
+            async with CurlAsyncSession(impersonate="chrome") as s:
+                response = await s.get(url, timeout=30)
+                if response.status_code == 200:
+                    html = response.text
+                    logger.info(f"Jobstreet: fetched via curl_cffi (status {response.status_code})")
+                else:
+                    logger.warning(f"Jobstreet curl_cffi: status {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Jobstreet curl_cffi error: {e}")
+    else:
+        logger.warning("curl_cffi not installed, trying httpx (may get 403)")
     
-    try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            response = await client.get(url, headers=jobstreet_headers)
-            response.raise_for_status()
-            html = response.text
-    except httpx.HTTPStatusError as e:
-        logger.warning(f"Jobstreet HTTP error {e.response.status_code} for: {url}")
-        return []
-    except Exception as e:
-        logger.error(f"Jobstreet fetch error: {e}")
-        return []
+    # Fallback: httpx with browser-like headers
+    if not html:
+        jobstreet_headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                response = await client.get(url, headers=jobstreet_headers)
+                response.raise_for_status()
+                html = response.text
+        except Exception as e:
+            logger.warning(f"Jobstreet httpx fallback error: {e}")
     
     if not html:
+        logger.warning(f"Jobstreet: all fetch methods failed for {url}")
         return []
     
     jobs = _parse_jobstreet_html(html, url)
     
     if not jobs:
-        logger.warning(f"Jobstreet: no jobs found for {url}")
+        logger.warning(f"Jobstreet: no jobs parsed from {url}")
     
     return jobs
 
