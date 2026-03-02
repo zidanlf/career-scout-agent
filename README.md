@@ -17,8 +17,6 @@ Telegram bot that automatically scrapes job listings from multiple platforms and
 |----------|--------|-------|
 | LinkedIn | HTML scraping | Public job listings only |
 | Jobstreet | SEEK Search API + HTML fallback | Lightweight, no browser needed |
-| Dealls | HTML scraping | |
-| Others | Generic HTML parser | Best-effort extraction |
 
 ## Prerequisites
 
@@ -183,3 +181,4 @@ sudo systemctl start career-scout
 ## License
 
 MIT
+
