@@ -94,13 +94,12 @@ python main.py
 Job Found in Jobstreet!
 
 Role    : Data Engineer
-Exp     : Fresh Graduate
 Company : PT Tokopedia
 
 Apply Here
 ```
 
-Each notification includes the platform name, job role, experience level (extracted from description), company name, and a clickable apply link. The information is displayed in a monospace box with aligned colons for readability.
+Each notification includes the platform name, job role, company name, and a clickable apply link. The information is displayed in a monospace box with aligned colons for readability.
 
 ## Scheduling
 
