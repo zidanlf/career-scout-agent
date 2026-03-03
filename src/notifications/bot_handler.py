@@ -210,16 +210,12 @@ async def cmd_scanrss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not await check_job_processed(job["hash"], user_id):
             await log_processed_job(job["hash"], user_id)
             
-            title = job.get('title', 'No Title')
-            company = job.get('company', 'Unknown Company')
-            link = job.get('link', '#')
+            # Use shared formatter (set platform to RSS if not present)
+            if "platform" not in job:
+                job["platform"] = "RSS"
             
-            text = (
-                f"Job Found in RSS!\n\n"
-                f"<b>{title}</b>\n"
-                f"{company}\n\n"
-                f"<a href=\"{link}\">Apply Here</a>"
-            )
+            from main import format_job_notification
+            text = format_job_notification(job)
             
             await update.message.reply_html(text, disable_web_page_preview=True)
             sent += 1

@@ -8,6 +8,7 @@ Scrape & notify only — no AI analysis.
 import asyncio
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -59,6 +60,98 @@ SCAN_STATE = {
 
 # Timezone: WIB (UTC+7) - always use this for consistent scheduling
 WIB = timezone(timedelta(hours=7))
+
+
+def clean_company_name(company: str) -> str:
+    """
+    Clean company name from Jobstreet 'di' prefix.
+    e.g. 'diPT YAKIN BERTUMBUH SEKURITAS' -> 'PT YAKIN BERTUMBUH SEKURITAS'
+    """
+    if not company:
+        return company
+    # Strip leading 'di' prefix (Jobstreet prepends 'di' = Indonesian "at")
+    # Match 'di' followed by uppercase letter (e.g. diPT, diCV, diBank)
+    cleaned = re.sub(r'^di(?=[A-Z])', '', company)
+    return cleaned.strip()
+
+
+def extract_experience(description: str) -> str:
+    """
+    Extract experience requirement from job description text.
+    Returns a string like 'Fresh Graduate', '1-3 tahun', '5+ years', etc.
+    Falls back to '-' if nothing found.
+    """
+    if not description:
+        return "-"
+    
+    desc_lower = description.lower()
+    
+    # Check for fresh graduate / entry level first
+    fresh_patterns = [
+        r'fresh\s*grad(?:uate)?s?',
+        r'lulusan\s*baru',
+        r'entry[\s\-]?level',
+        r'tanpa\s*pengalaman',
+        r'no\s*experience\s*(?:required|needed)',
+        r'0\s*(?:tahun|years?)\s*(?:pengalaman|experience)',
+    ]
+    for pat in fresh_patterns:
+        if re.search(pat, desc_lower):
+            return "Fresh Graduate"
+    
+    # Extract specific experience requirements (e.g. "2-3 tahun", "3+ years")
+    exp_patterns = [
+        # "minimal 2 tahun pengalaman" / "minimum 2 years experience"
+        r'(?:minimal?|minimum|at\s*least|setidaknya)\s*(\d+)\s*(?:[-–]\s*(\d+)\s*)?(?:tahun|years?|thn)',
+        # "pengalaman 2-3 tahun" / "experience 2-3 years"
+        r'(?:pengalaman|experience)\s*(?:kerja\s*)?(?:minimal?\s*)?(\d+)\s*[-–]\s*(\d+)\s*(?:tahun|years?|thn)',
+        # "2-3 tahun pengalaman" / "2-3 years of experience"
+        r'(\d+)\s*[-–]\s*(\d+)\s*(?:tahun|years?|thn)\s*(?:pengalaman|experience|of\s*experience)',
+        # "3+ years" / "3+ tahun"
+        r'(\d+)\s*\+?\s*(?:tahun|years?|thn)\s*(?:pengalaman|experience|of\s*experience)',
+        # "pengalaman minimal 2 tahun"
+        r'(?:pengalaman|experience)\s*(?:kerja\s*)?(?:minimal?\s*)?(\d+)\s*(?:tahun|years?|thn)',
+        # "min. 2 years" / "min 2 tahun"
+        r'min\.?\s*(\d+)\s*(?:[-–]\s*(\d+)\s*)?(?:tahun|years?|thn)',
+    ]
+    
+    for pat in exp_patterns:
+        match = re.search(pat, desc_lower)
+        if match:
+            groups = [g for g in match.groups() if g is not None]
+            if len(groups) == 2:
+                return f"{groups[0]}-{groups[1]} Tahun"
+            elif len(groups) == 1:
+                return f"{groups[0]}+ Tahun"
+    
+    return "-"
+
+
+def format_job_notification(job: dict) -> str:
+    """
+    Format a job notification message with aligned colons in a pre box.
+    Returns HTML-formatted string.
+    """
+    title = job.get('title', 'No Title')
+    company = clean_company_name(job.get('company', 'Unknown Company'))
+    link = job.get('link', '#')
+    description = job.get('description', '')
+    platform = job.get('platform', 'unknown').capitalize()
+    
+    experience = extract_experience(description)
+    
+    # Build the pre-formatted box with aligned colons
+    text = (
+        f"<b>Job Found in {platform}!</b>\n\n"
+        f"<pre>"
+        f"Role    : {title}\n"
+        f"Exp     : {experience}\n"
+        f"Company : {company}"
+        f"</pre>\n\n"
+        f"<a href=\"{link}\">Apply Here</a>"
+    )
+    
+    return text
 
 
 async def process_user_jobs(user_id: int, bot_app) -> None:
@@ -174,18 +267,7 @@ async def process_monitored_urls(bot_app, user_id: int = None) -> dict:
 async def send_notification(bot_app, user_id: int, job: dict) -> None:
     """Send a job notification via Telegram."""
     try:
-        title = job.get('title', 'No Title')
-        company = job.get('company', 'Unknown Company')
-        link = job.get('link', '#')
-        
-        platform = job.get('platform', 'unknown').capitalize()
-        
-        text = (
-            f"Job Found in {platform}!\n\n"
-            f"<b>{title}</b>\n"
-            f"{company}\n\n"
-            f"<a href=\"{link}\">Apply Here</a>"
-        )
+        text = format_job_notification(job)
         
         await bot_app.bot.send_message(
             chat_id=user_id,
@@ -194,6 +276,7 @@ async def send_notification(bot_app, user_id: int, job: dict) -> None:
             disable_web_page_preview=True
         )
         
+        title = job.get('title', 'No Title')
         logger.info(f"Notification sent to user {user_id}: {title[:30]}...")
         
     except Exception as e:
