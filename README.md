@@ -61,6 +61,14 @@ python main.py
 
 ## Bot Commands
 
+### Keyword Filtering
+
+| Command | Description |
+|---------|-------------|
+| `/setkeywords <k1>, <k2>` | Set role filter keywords |
+| `/listkeywords` | Show active keywords |
+| `/delkeywords` | Remove all keywords |
+
 ### RSS Feed
 
 | Command | Description |
@@ -83,9 +91,8 @@ python main.py
 
 | Command | Description |
 |---------|-------------|
-| `/next` | Show next scan schedule |
+| `/status` | System status + keywords |
 | `/report` | 24-hour job summary |
-| `/status` | System status |
 | `/clearjobs` | Reset job history (re-discover all jobs) |
 
 ## Notification Format
@@ -101,14 +108,24 @@ Apply Here
 
 Each notification includes the platform name, job role, company name, and a clickable apply link. The information is displayed in a monospace box with aligned colons for readability.
 
+## Keyword Filtering
+
+Users can set keywords to filter job notifications by role title:
+
+```
+/setkeywords data, etl, engineer
+```
+
+Only jobs whose title contains at least one keyword will trigger a notification. Matching is **case-insensitive** and **partial** (e.g. keyword `data` matches "Data Engineer", "Big Data Analyst"). If no keywords are set, all jobs are shown.
+
 ## Scheduling
 
-The bot scans automatically every hour with user rotation:
+The bot scans continuously every **10 minutes** for **all users**:
 
-- **Even hours** (00, 02, 04, ...) → User A's RSS + monitored URLs
-- **Odd hours** (01, 03, 05, ...) → User B's RSS + monitored URLs
-
-Use `/next` to check the upcoming scan schedule.
+- Scrapes all monitored URLs for each user
+- Fetches RSS feeds for each user
+- Applies keyword filtering before sending notifications
+- Only new (unseen) jobs trigger notifications
 
 ## Project Structure
 

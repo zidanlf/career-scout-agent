@@ -21,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from src.database.db_manager import (
     init_db, 
     get_user_rss,
+    get_all_users,
+    get_user_keywords,
     log_processed_job,
     get_all_monitored_urls,
     check_job_processed,
@@ -51,11 +53,13 @@ logger = logging.getLogger("main")
 ZIDAN_ID = int(os.getenv("ZIDAN_ID", "0"))
 PARTNER_ID = int(os.getenv("PARTNER_ID", "0"))
  
+# Scan interval in seconds (10 minutes)
+SCAN_INTERVAL = 600
+
 # Global state for scheduling information
 SCAN_STATE = {
-    "next_run_time": None,
-    "next_user": "Unknown",
-    "last_run_time": None
+    "last_run_time": None,
+    "interval_minutes": SCAN_INTERVAL // 60,
 }
 
 # Timezone: WIB (UTC+7) - always use this for consistent scheduling
@@ -98,10 +102,22 @@ def format_job_notification(job: dict) -> str:
     return text
 
 
-async def process_user_jobs(user_id: int, bot_app) -> None:
+def job_matches_keywords(title: str, keywords: list[str]) -> bool:
+    """
+    Check if a job title matches any of the user's keywords.
+    Case-insensitive partial match.
+    If keywords list is empty, matches everything (no filter).
+    """
+    if not keywords:
+        return True  # No keywords set = show all jobs
+    title_lower = title.lower()
+    return any(kw in title_lower for kw in keywords)
+
+
+async def process_user_jobs(user_id: int, bot_app, keywords: list[str] = None) -> None:
     """
     Process jobs for a single user from RSS feed.
-    Fetches RSS and sends notifications for all new jobs.
+    Fetches RSS and sends notifications for matching jobs.
     """
     logger.info(f"Starting RSS job scan for user {user_id}")
     
@@ -110,6 +126,10 @@ async def process_user_jobs(user_id: int, bot_app) -> None:
     if not rss_url:
         logger.info(f"User {user_id} has no RSS URL configured")
         return
+    
+    # Fetch keywords if not provided
+    if keywords is None:
+        keywords = await get_user_keywords(user_id)
     
     # Fetch fresh jobs
     jobs = await get_fresh_jobs(rss_url, user_id)
@@ -121,25 +141,30 @@ async def process_user_jobs(user_id: int, bot_app) -> None:
     logger.info(f"Found {len(jobs)} new jobs for user {user_id}")
     
     sent = 0
+    filtered = 0
     for job in jobs:
         try:
             await log_processed_job(job["hash"], user_id)
-            await send_notification(bot_app, user_id, job)
-            sent += 1
+            
+            if job_matches_keywords(job.get("title", ""), keywords):
+                await send_notification(bot_app, user_id, job)
+                sent += 1
+            else:
+                filtered += 1
         except Exception as e:
             logger.error(f"Error processing job '{job['title'][:50]}...': {e}")
     
-    logger.info(f"RSS scan done for user {user_id}: {sent}/{len(jobs)} jobs notified")
+    logger.info(f"RSS scan done for user {user_id}: {sent} notified, {filtered} filtered")
 
 
-async def process_monitored_urls(bot_app, user_id: int = None) -> dict:
+async def process_monitored_urls(bot_app, user_id: int = None, keywords: list[str] = None) -> dict:
     """
     Process monitored URLs. 
-    Returns summary dict: {total_scraped, new_sent, already_processed, errors}
+    Returns summary dict: {total_scraped, new_sent, already_processed, filtered, errors}
     """
     logger.info(f"=== Starting monitored URL scan {'for user ' + str(user_id) if user_id else '(All Users)'} ===")
     
-    summary = {"total_scraped": 0, "new_sent": 0, "already_processed": 0, "errors": 0}
+    summary = {"total_scraped": 0, "new_sent": 0, "already_processed": 0, "filtered": 0, "errors": 0}
     
     # Get monitored URLs
     from src.database.db_manager import get_monitored_urls
@@ -155,9 +180,21 @@ async def process_monitored_urls(bot_app, user_id: int = None) -> dict:
     
     logger.info(f"Processing {len(monitored_urls)} monitored URLs")
     
+    # If keywords not provided and user_id given, fetch from DB
+    if keywords is None and user_id:
+        keywords = await get_user_keywords(user_id)
+    elif keywords is None:
+        keywords = []
+    
     for url_data in monitored_urls:
         current_user_id = user_id if user_id else url_data.get("user_id")
         url = url_data["url"]
+        
+        # If scanning all users, get keywords per user
+        if not user_id:
+            user_keywords = await get_user_keywords(current_user_id)
+        else:
+            user_keywords = keywords
         
         try:
             logger.info(f"Scraping URL for user {current_user_id}: {url[:50]}...")
@@ -187,17 +224,24 @@ async def process_monitored_urls(bot_app, user_id: int = None) -> dict:
             
             logger.info(f"{len(new_jobs)} new jobs from URL")
             
-            # Send all new jobs as notifications
+            # Send all new jobs as notifications (with keyword filter)
             for job in new_jobs:
                 try:
+                    # Always log as processed (prevents re-checking)
                     await log_processed_job(job["hash"], current_user_id)
-                    await send_notification(bot_app, current_user_id, job)
-                    summary["new_sent"] += 1
+                    
+                    # Only notify if matches keywords
+                    if job_matches_keywords(job.get("title", ""), user_keywords):
+                        await send_notification(bot_app, current_user_id, job)
+                        summary["new_sent"] += 1
+                    else:
+                        summary["filtered"] += 1
+                        logger.debug(f"Filtered out (keywords): {job.get('title', '')[:40]}")
                 except Exception as e:
                     logger.error(f"Error sending notification: {e}")
                     summary["errors"] += 1
             
-            logger.info(f"URL processed: {len(new_jobs)} new jobs sent")
+            logger.info(f"URL processed: {summary['new_sent']} sent, {summary['filtered']} filtered")
             
         except Exception as e:
             logger.error(f"Error processing URL {url[:50]}...: {e}")
@@ -229,51 +273,50 @@ async def send_notification(bot_app, user_id: int, job: dict) -> None:
 
 async def scheduled_scan(bot_app) -> None:
     """
-    Scheduled job scanner.
-    Runs every hour:
-    - Process RSS feeds with user rotation
-    - Process all monitored URLs
+    Continuous job scanner.
+    Runs every 10 minutes, scanning ALL users' RSS feeds and monitored URLs.
+    Applies keyword filtering per user.
     """
     while True:
         try:
-            current_hour = datetime.now(WIB).hour
-            
-            # === RSS Feed Scan (User Rotation) ===
-            if current_hour % 2 == 0:
-                target_user = ZIDAN_ID
-                user_name = "ZIDAN"
-            else:
-                target_user = PARTNER_ID
-                user_name = "PARTNER"
-            
-            if target_user == 0:
-                logger.warning(f"{user_name}_ID not configured, skipping RSS scan")
-            else:
-                logger.info(f"=== RSS scan starting for {user_name} (Hour: {current_hour}) ===")
-                await process_user_jobs(target_user, bot_app)
-                logger.info(f"=== RSS scan completed for {user_name} ===")
-            
-            # === Monitored URL Scan (Unified with RSS Rotation) ===
-            if target_user != 0:
-                logger.info(f"=== URL scan starting for {user_name} ===")
-                await process_monitored_urls(bot_app, target_user)
-                logger.info(f"=== URL scan completed for {user_name} ===")
-            
-            # === Update Next Scan Info ===
             now = datetime.now(WIB)
-            next_time = now.hour + 1
-            next_user_name = "PARTNER" if next_time % 2 != 0 else "ZIDAN"
+            logger.info(f"=== Scheduled scan starting at {now.strftime('%H:%M:%S')} ===")
             
-            SCAN_STATE["last_run_time"] = now.strftime("%H:%M:%S")
-            SCAN_STATE["next_run_time"] = f"{next_time:02d}:00"
-            SCAN_STATE["next_user"] = next_user_name
+            # Get all registered users
+            all_users = await get_all_users()
+            
+            if not all_users:
+                logger.info("No registered users, skipping scan")
+            else:
+                for user_data in all_users:
+                    user_id = user_data["telegram_id"]
+                    user_name = user_data.get("name", "Unknown")
+                    keywords = [k.strip().lower() for k in (user_data.get("keywords") or "").split(",") if k.strip()]
+                    
+                    logger.info(f"--- Scanning for {user_name} (ID: {user_id}, keywords: {keywords or 'none'}) ---")
+                    
+                    # RSS Feed scan
+                    if user_data.get("rss_url"):
+                        try:
+                            await process_user_jobs(user_id, bot_app, keywords)
+                        except Exception as e:
+                            logger.error(f"RSS scan error for {user_name}: {e}")
+                    
+                    # Monitored URL scan
+                    try:
+                        await process_monitored_urls(bot_app, user_id, keywords)
+                    except Exception as e:
+                        logger.error(f"URL scan error for {user_name}: {e}")
+            
+            # Update scan state
+            SCAN_STATE["last_run_time"] = datetime.now(WIB).strftime("%H:%M:%S")
             
         except Exception as e:
             logger.error(f"Scheduled scan error: {e}")
         
-        # Wait 60 minutes
-        logger.info("Next scan in 60 minutes...")
-        await asyncio.sleep(3600)
+        # Wait for next scan
+        logger.info(f"Next scan in {SCAN_INTERVAL // 60} minutes...")
+        await asyncio.sleep(SCAN_INTERVAL)
 
 
 async def main() -> None:

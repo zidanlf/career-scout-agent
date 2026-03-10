@@ -24,6 +24,9 @@ from src.database.db_manager import (
     delete_rss,
     get_db_stats,
     get_jobs_last_24h,
+    get_user_keywords,
+    update_keywords,
+    delete_keywords,
     add_monitored_url,
     get_monitored_urls,
     delete_monitored_url,
@@ -80,6 +83,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_html(
         f"<b>Welcome, {user.first_name}!</b>\n"
         "You have been registered in Career Scout.\n\n"
+        "<b>Keywords</b>\n"
+        "/setkeywords &lt;k1&gt;, &lt;k2&gt; - Set role filter keywords\n"
+        "/listkeywords - Show active keywords\n"
+        "/delkeywords - Remove all keywords\n\n"
         "<b>RSS Feed</b>\n"
         "/setrss &lt;url&gt; - Set RSS feed URL\n"
         "/delrss - Remove RSS feed\n"
@@ -90,9 +97,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/delmonitor &lt;id&gt; - Remove monitored URL\n"
         "/scanmonitor - Scan all monitored URLs now\n\n"
         "<b>Info</b>\n"
-        "/next - Check next scan schedule\n"
-        "/report - 24h summary\n"
         "/status - System status\n"
+        "/report - 24h summary\n"
         "/clearjobs - Reset job history (re-discover all jobs)"
     )
     logger.info(f"User registered: {user.id} ({user.full_name})")
@@ -131,22 +137,24 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user_id = update.effective_user.id
     rss_url = await get_user_rss(user_id)
     db_stats = await get_db_stats()
+    keywords = await get_user_keywords(user_id)
     
     rss_status = "Configured" if rss_url else "Not configured"
+    kw_display = ", ".join(keywords) if keywords else "None (all jobs shown)"
     
-    # Get schedule info from main.SCAN_STATE
-    from main import SCAN_STATE
+    # Get schedule info from main
+    from main import SCAN_STATE, SCAN_INTERVAL
     last_run = SCAN_STATE.get("last_run_time", "Never")
-    next_run = SCAN_STATE.get("next_run_time", "Calculating...")
-    next_user = SCAN_STATE.get("next_user", "Unknown")
+    interval = SCAN_INTERVAL // 60
     
     await update.message.reply_text(
         "*System Status*\n\n"
         "*Your Profile:*\n"
-        f"- RSS Feed: {rss_status}\n\n"
+        f"- RSS Feed: {rss_status}\n"
+        f"- Keywords: {kw_display}\n\n"
         "*Schedule:*\n"
         f"- Last Run: {last_run}\n"
-        f"- Next Run: {next_run} ({next_user}'s RSS)\n\n"
+        f"- Interval: Every {interval} minutes (all users)\n\n"
         "*Database Statistics:*\n"
         f"- Users: {db_stats.get('users', 0)}\n"
         f"- Jobs Processed: {db_stats.get('processed_jobs', 0)}\n"
@@ -223,43 +231,75 @@ async def cmd_scanrss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(f"Scan complete. {sent} new job(s) notified.")
 
 
+# ============== KEYWORD COMMANDS ==============
+
 @authorized_only
-async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show the next scan schedule info."""
-    from main import SCAN_STATE, WIB
+async def cmd_setkeywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Set keyword filter for job notifications.
+    Usage: /setkeywords data, etl, engineer
+    """
+    user_id = update.effective_user.id
     
-    last_run = SCAN_STATE.get("last_run_time")
-    next_run = SCAN_STATE.get("next_run_time")
-    next_user = SCAN_STATE.get("next_user")
+    if not context.args:
+        await update.message.reply_html(
+            "<b>Usage:</b> <code>/setkeywords kata1, kata2, kata3</code>\n\n"
+            "<b>Example:</b>\n"
+            "<code>/setkeywords data, etl, engineer</code>\n\n"
+            "Only jobs with titles matching any keyword will be notified.\n"
+            "Matching is case-insensitive and partial (e.g. 'data' matches 'Data Engineer')."
+        )
+        return
     
-    if not next_run:
-        now = datetime.now(WIB)
-        next_hour = now.hour + 1
-        target_user = "PARTNER" if next_hour % 2 != 0 else "ZIDAN"
-        next_run = f"{next_hour:02d}:00"
-        next_user = target_user
-
-    # Calculate countdown
-    now = datetime.now(WIB)
-    try:
-        next_hour_val = int(next_run.split(":")[0])
-        minutes_left = (next_hour_val * 60) - (now.hour * 60 + now.minute)
-        if minutes_left < 0: minutes_left += 24 * 60 
-        
-        countdown = f"{minutes_left // 60}h {minutes_left % 60}m"
-    except:
-        countdown = "Calculating..."
-
-    text = (
-        "<b>NEXT SCAN SCHEDULE</b>\n\n"
-        f"<b>Last Run:</b>  {last_run or 'None'}\n"
-        f"<b>Next Run:</b>  {next_run}\n"
-        f"<b>Target:</b>    {next_user}\n"
-        f"<b>Remaining:</b> {countdown}\n\n"
-        "<i>Note: Both RSS Feed and Monitored URLs for the target user will be scanned.</i>"
+    # Join all args and split by comma
+    raw = " ".join(context.args)
+    keywords = [k.strip().lower() for k in raw.split(",") if k.strip()]
+    
+    if not keywords:
+        await update.message.reply_text("No valid keywords found. Separate keywords with commas.")
+        return
+    
+    keywords_str = ",".join(keywords)
+    await update_keywords(user_id, keywords_str)
+    
+    kw_display = ", ".join(keywords)
+    await update.message.reply_html(
+        f"<b>Keywords Updated</b>\n\n"
+        f"<pre>Keywords : {kw_display}</pre>\n\n"
+        f"Only jobs matching these keywords will be notified."
     )
+
+
+@authorized_only
+async def cmd_listkeywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show current keyword filters."""
+    user_id = update.effective_user.id
+    keywords = await get_user_keywords(user_id)
     
-    await update.message.reply_html(text)
+    if not keywords:
+        await update.message.reply_html(
+            "No keywords set. All jobs will be notified.\n"
+            "Use <code>/setkeywords</code> to filter by role."
+        )
+        return
+    
+    kw_display = ", ".join(keywords)
+    await update.message.reply_html(
+        f"<b>Your Keywords</b>\n\n"
+        f"<pre>{kw_display}</pre>\n\n"
+        f"Only jobs matching these keywords will be notified."
+    )
+
+
+@authorized_only
+async def cmd_delkeywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove all keyword filters."""
+    user_id = update.effective_user.id
+    await delete_keywords(user_id)
+    await update.message.reply_html(
+        "<b>Keywords removed.</b>\n\n"
+        "All jobs will now be notified without filtering."
+    )
 
 
 # ============== URL MONITORING COMMANDS ==============
@@ -302,7 +342,7 @@ async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"TAG   : {label}\n"
         f"URL   : {url[:50]}{'...' if len(url) > 50 else ''}"
         f"</pre>\n"
-        f"This URL will be scanned hourly."
+        f"This URL will be scanned every 10 minutes."
     )
     
     logger.info(f"User {user_id} added monitored URL: id={new_id} tag={label}")
@@ -351,12 +391,14 @@ async def cmd_scanmonitor(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     total_scraped = summary.get("total_scraped", 0)
     new_sent = summary.get("new_sent", 0)
     already_processed = summary.get("already_processed", 0)
+    filtered = summary.get("filtered", 0)
     errors = summary.get("errors", 0)
     
     text = (
         "<b>Scan Complete</b>\n\n"
         f"Jobs scraped: {total_scraped}\n"
         f"New jobs sent: {new_sent}\n"
+        f"Filtered (keywords): {filtered}\n"
         f"Already processed: {already_processed}\n"
     )
     if errors:
@@ -418,10 +460,12 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("setrss", cmd_setrss))
     app.add_handler(CommandHandler("delrss", cmd_delrss))
+    app.add_handler(CommandHandler("setkeywords", cmd_setkeywords))
+    app.add_handler(CommandHandler("listkeywords", cmd_listkeywords))
+    app.add_handler(CommandHandler("delkeywords", cmd_delkeywords))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("scanrss", cmd_scanrss))
-    app.add_handler(CommandHandler("next", cmd_next))
     app.add_handler(CommandHandler("monitor", cmd_monitor))
     app.add_handler(CommandHandler("scanmonitor", cmd_scanmonitor))
     app.add_handler(CommandHandler("delmonitor", cmd_delmonitor))

@@ -26,9 +26,18 @@ async def init_db() -> None:
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id INTEGER PRIMARY KEY,
                 name TEXT,
-                rss_url TEXT
+                rss_url TEXT,
+                keywords TEXT
             )
         """)
+        
+        # Migration: add keywords column if missing (for existing DBs)
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN keywords TEXT")
+            await db.commit()
+            logger.info("Migrated: added 'keywords' column to users table")
+        except Exception:
+            pass  # Column already exists
         
         # Processed jobs table for deduplication
         await db.execute("""
@@ -81,6 +90,52 @@ async def get_user_rss(telegram_id: int) -> Optional[str]:
         ) as cursor:
             row = await cursor.fetchone()
         return row[0] if row else None
+
+
+async def get_all_users() -> list[dict]:
+    """Get all registered users."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT telegram_id, name, rss_url, keywords FROM users"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def get_user_keywords(telegram_id: int) -> list[str]:
+    """Get keyword list for a user. Returns empty list if none set."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT keywords FROM users WHERE telegram_id = ?",
+            (telegram_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+    if not row or not row[0]:
+        return []
+    return [k.strip().lower() for k in row[0].split(",") if k.strip()]
+
+
+async def update_keywords(telegram_id: int, keywords_str: str) -> None:
+    """Update keywords for a user. Pass empty string to clear."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET keywords = ? WHERE telegram_id = ?",
+            (keywords_str if keywords_str else None, telegram_id)
+        )
+        await db.commit()
+        logger.info(f"Keywords updated for user {telegram_id}: {keywords_str}")
+
+
+async def delete_keywords(telegram_id: int) -> None:
+    """Remove all keywords for a user."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET keywords = NULL WHERE telegram_id = ?",
+            (telegram_id,)
+        )
+        await db.commit()
+        logger.info(f"Keywords deleted for user {telegram_id}")
 
 
 # ============== RSS OPERATIONS ==============
