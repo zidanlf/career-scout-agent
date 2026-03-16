@@ -144,6 +144,10 @@ async def process_user_jobs(user_id: int, bot_app, keywords: list[str] = None) -
     filtered = 0
     for job in jobs:
         try:
+            # Skip if already processed (prevent duplicate notifications)
+            if await check_job_processed(job["hash"], user_id):
+                continue
+
             await log_processed_job(job["hash"], user_id)
             
             if job_matches_keywords(job.get("title", ""), keywords):
