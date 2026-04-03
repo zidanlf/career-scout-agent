@@ -27,7 +27,8 @@ async def init_db() -> None:
                 telegram_id INTEGER PRIMARY KEY,
                 name TEXT,
                 rss_url TEXT,
-                keywords TEXT
+                keywords TEXT,
+                active INTEGER DEFAULT 1
             )
         """)
         
@@ -36,6 +37,14 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE users ADD COLUMN keywords TEXT")
             await db.commit()
             logger.info("Migrated: added 'keywords' column to users table")
+        except Exception:
+            pass  # Column already exists
+        
+        # Migration: add active column if missing (for existing DBs)
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN active INTEGER DEFAULT 1")
+            await db.commit()
+            logger.info("Migrated: added 'active' column to users table")
         except Exception:
             pass  # Column already exists
         
@@ -97,7 +106,7 @@ async def get_all_users() -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT telegram_id, name, rss_url, keywords FROM users"
+            "SELECT telegram_id, name, rss_url, keywords, active FROM users"
         ) as cursor:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
@@ -125,6 +134,29 @@ async def update_keywords(telegram_id: int, keywords_str: str) -> None:
         )
         await db.commit()
         logger.info(f"Keywords updated for user {telegram_id}: {keywords_str}")
+
+
+async def set_user_active(telegram_id: int, active: bool) -> None:
+    """Set user active status. Active=True means scanning is enabled."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET active = ? WHERE telegram_id = ?",
+            (1 if active else 0, telegram_id)
+        )
+        await db.commit()
+        status = "active" if active else "paused"
+        logger.info(f"User {telegram_id} set to {status}")
+
+
+async def get_user_active(telegram_id: int) -> bool:
+    """Check if user scanning is active."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT active FROM users WHERE telegram_id = ?",
+            (telegram_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return bool(row[0]) if row else True
 
 
 async def delete_keywords(telegram_id: int) -> None:

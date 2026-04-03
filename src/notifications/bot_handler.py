@@ -33,6 +33,8 @@ from src.database.db_manager import (
     log_processed_job,
     check_job_processed,
     clear_processed_jobs,
+    set_user_active,
+    get_user_active,
 )
 from src.scrapers.rss_parser import get_fresh_jobs
 
@@ -96,6 +98,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/listmonitor - List monitored URLs\n"
         "/delmonitor &lt;id&gt; - Remove monitored URL\n"
         "/scanmonitor - Scan all monitored URLs now\n\n"
+        "<b>Control</b>\n"
+        "/pause - Pause auto-scanning\n"
+        "/resume - Resume auto-scanning\n\n"
         "<b>Info</b>\n"
         "/status - System status\n"
         "/report - 24h summary\n"
@@ -141,20 +146,23 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     
     rss_status = "Configured" if rss_url else "Not configured"
     kw_display = ", ".join(keywords) if keywords else "None (all jobs shown)"
+    is_active = await get_user_active(user_id)
+    scan_status = "✅ Active" if is_active else "⏸ Paused"
     
     # Get schedule info from main
     from main import SCAN_STATE, SCAN_INTERVAL
     last_run = SCAN_STATE.get("last_run_time", "Never")
-    interval = SCAN_INTERVAL // 60
+    interval = SCAN_INTERVAL
     
     await update.message.reply_text(
         "*System Status*\n\n"
         "*Your Profile:*\n"
+        f"- Scanning: {scan_status}\n"
         f"- RSS Feed: {rss_status}\n"
         f"- Keywords: {kw_display}\n\n"
         "*Schedule:*\n"
         f"- Last Run: {last_run}\n"
-        f"- Interval: Every {interval} minutes (all users)\n\n"
+        f"- Interval: Every {interval} seconds (active users only)\n\n"
         "*Database Statistics:*\n"
         f"- Users: {db_stats.get('users', 0)}\n"
         f"- Jobs Processed: {db_stats.get('processed_jobs', 0)}\n"
@@ -448,6 +456,31 @@ async def cmd_clearjobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+@authorized_only
+async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pause auto-scanning for this user."""
+    user_id = update.effective_user.id
+    await set_user_active(user_id, False)
+    await update.message.reply_html(
+        "<b>⏸ Scanning Paused</b>\n\n"
+        "Auto-scanning has been paused for your account.\n"
+        "You will no longer receive automatic job notifications.\n\n"
+        "Use <code>/resume</code> to re-enable scanning."
+    )
+
+
+@authorized_only
+async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Resume auto-scanning for this user."""
+    user_id = update.effective_user.id
+    await set_user_active(user_id, True)
+    await update.message.reply_html(
+        "<b>▶️ Scanning Resumed</b>\n\n"
+        "Auto-scanning has been re-enabled for your account.\n"
+        "You will receive job notifications again on every scan cycle."
+    )
+
+
 # ============== APPLICATION FACTORY ==============
 
 def create_bot_application(token: str) -> Application:
@@ -471,6 +504,8 @@ def create_bot_application(token: str) -> Application:
     app.add_handler(CommandHandler("delmonitor", cmd_delmonitor))
     app.add_handler(CommandHandler("listmonitor", cmd_listmonitor))
     app.add_handler(CommandHandler("clearjobs", cmd_clearjobs))
+    app.add_handler(CommandHandler("pause", cmd_pause))
+    app.add_handler(CommandHandler("resume", cmd_resume))
     
     logger.info("Bot application created with all handlers")
     return app

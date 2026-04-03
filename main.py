@@ -53,8 +53,8 @@ logger = logging.getLogger("main")
 ZIDAN_ID = int(os.getenv("ZIDAN_ID", "0"))
 PARTNER_ID = int(os.getenv("PARTNER_ID", "0"))
  
-# Scan interval in seconds (10 minutes)
-SCAN_INTERVAL = 600
+# Scan interval in seconds (1 minute — near real-time)
+SCAN_INTERVAL = 60
 
 # Global state for scheduling information
 SCAN_STATE = {
@@ -292,25 +292,35 @@ async def scheduled_scan(bot_app) -> None:
             if not all_users:
                 logger.info("No registered users, skipping scan")
             else:
-                for user_data in all_users:
-                    user_id = user_data["telegram_id"]
-                    user_name = user_data.get("name", "Unknown")
-                    keywords = [k.strip().lower() for k in (user_data.get("keywords") or "").split(",") if k.strip()]
-                    
-                    logger.info(f"--- Scanning for {user_name} (ID: {user_id}, keywords: {keywords or 'none'}) ---")
-                    
-                    # RSS Feed scan
-                    if user_data.get("rss_url"):
+                # Filter only active users
+                active_users = [u for u in all_users if u.get("active", 1)]
+                skipped = len(all_users) - len(active_users)
+                
+                if skipped:
+                    logger.info(f"Skipping {skipped} paused user(s)")
+                
+                if not active_users:
+                    logger.info("No active users, skipping scan")
+                else:
+                    for user_data in active_users:
+                        user_id = user_data["telegram_id"]
+                        user_name = user_data.get("name", "Unknown")
+                        keywords = [k.strip().lower() for k in (user_data.get("keywords") or "").split(",") if k.strip()]
+                        
+                        logger.info(f"--- Scanning for {user_name} (ID: {user_id}, keywords: {keywords or 'none'}) ---")
+                        
+                        # RSS Feed scan
+                        if user_data.get("rss_url"):
+                            try:
+                                await process_user_jobs(user_id, bot_app, keywords)
+                            except Exception as e:
+                                logger.error(f"RSS scan error for {user_name}: {e}")
+                        
+                        # Monitored URL scan
                         try:
-                            await process_user_jobs(user_id, bot_app, keywords)
+                            await process_monitored_urls(bot_app, user_id, keywords)
                         except Exception as e:
-                            logger.error(f"RSS scan error for {user_name}: {e}")
-                    
-                    # Monitored URL scan
-                    try:
-                        await process_monitored_urls(bot_app, user_id, keywords)
-                    except Exception as e:
-                        logger.error(f"URL scan error for {user_name}: {e}")
+                            logger.error(f"URL scan error for {user_name}: {e}")
             
             # Update scan state
             SCAN_STATE["last_run_time"] = datetime.now(WIB).strftime("%H:%M:%S")
@@ -319,7 +329,7 @@ async def scheduled_scan(bot_app) -> None:
             logger.error(f"Scheduled scan error: {e}")
         
         # Wait for next scan
-        logger.info(f"Next scan in {SCAN_INTERVAL // 60} minutes...")
+        logger.info(f"Next scan in {SCAN_INTERVAL} seconds...")
         await asyncio.sleep(SCAN_INTERVAL)
 
 
