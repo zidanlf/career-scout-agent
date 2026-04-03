@@ -277,10 +277,12 @@ async def send_notification(bot_app, user_id: int, job: dict) -> None:
 
 async def scheduled_scan(bot_app) -> None:
     """
-    Continuous job scanner.
-    Runs every 10 minutes, scanning ALL users' RSS feeds and monitored URLs.
-    Applies keyword filtering per user.
+    Continuous job scanner with round-robin scheduling.
+    Scans ONE active user per cycle (every 60 seconds), rotating turns.
+    If only 1 active user, that user gets scanned every cycle.
     """
+    scan_index = 0  # Round-robin index
+    
     while True:
         try:
             now = datetime.now(WIB)
@@ -302,25 +304,31 @@ async def scheduled_scan(bot_app) -> None:
                 if not active_users:
                     logger.info("No active users, skipping scan")
                 else:
-                    for user_data in active_users:
-                        user_id = user_data["telegram_id"]
-                        user_name = user_data.get("name", "Unknown")
-                        keywords = [k.strip().lower() for k in (user_data.get("keywords") or "").split(",") if k.strip()]
-                        
-                        logger.info(f"--- Scanning for {user_name} (ID: {user_id}, keywords: {keywords or 'none'}) ---")
-                        
-                        # RSS Feed scan
-                        if user_data.get("rss_url"):
-                            try:
-                                await process_user_jobs(user_id, bot_app, keywords)
-                            except Exception as e:
-                                logger.error(f"RSS scan error for {user_name}: {e}")
-                        
-                        # Monitored URL scan
+                    # Round-robin: pick one user per cycle
+                    scan_index = scan_index % len(active_users)
+                    user_data = active_users[scan_index]
+                    
+                    user_id = user_data["telegram_id"]
+                    user_name = user_data.get("name", "Unknown")
+                    keywords = [k.strip().lower() for k in (user_data.get("keywords") or "").split(",") if k.strip()]
+                    
+                    logger.info(f"--- Scanning for {user_name} (ID: {user_id}, turn: {scan_index + 1}/{len(active_users)}, keywords: {keywords or 'none'}) ---")
+                    
+                    # RSS Feed scan
+                    if user_data.get("rss_url"):
                         try:
-                            await process_monitored_urls(bot_app, user_id, keywords)
+                            await process_user_jobs(user_id, bot_app, keywords)
                         except Exception as e:
-                            logger.error(f"URL scan error for {user_name}: {e}")
+                            logger.error(f"RSS scan error for {user_name}: {e}")
+                    
+                    # Monitored URL scan
+                    try:
+                        await process_monitored_urls(bot_app, user_id, keywords)
+                    except Exception as e:
+                        logger.error(f"URL scan error for {user_name}: {e}")
+                    
+                    # Move to next user for next cycle
+                    scan_index += 1
             
             # Update scan state
             SCAN_STATE["last_run_time"] = datetime.now(WIB).strftime("%H:%M:%S")
