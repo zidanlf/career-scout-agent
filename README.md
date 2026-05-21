@@ -1,13 +1,13 @@
 # Career Scout Agent
 
-Telegram bot that automatically scrapes job listings from multiple platforms and sends real-time notifications. Supports scheduled hourly scans with multi-user rotation.
+Telegram bot that automatically scrapes job listings from multiple platforms and sends real-time notifications. Supports scheduled 1-minute rotation scans with multi-user round-robin.
 
 ## Features
 
 - **Multi-platform scraping** — LinkedIn, Jobstreet, Dealls, Glints, and Kalibrr
 - **RSS feed monitoring** via RSS-Bridge (self-hosted)
 - **URL monitoring** — track specific search result pages for new listings
-- **Scheduled hourly scans** with user rotation (even hours / odd hours)
+- **Scheduled 1-minute rotation scans** with user round-robin rotation
 - **Telegram bot interface** with whitelist security
 - **Deduplication** — only notifies for new job listings
 

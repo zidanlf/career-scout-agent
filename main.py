@@ -1,6 +1,6 @@
 """
 Career Scout Agent - Main Orchestrator
-Runs the Telegram bot with hourly job scanning scheduler.
+Runs the Telegram bot with 1-minute rotation job scanning scheduler.
 Includes RSS feed and URL monitoring support.
 Scrape & notify only — no AI analysis.
 """
