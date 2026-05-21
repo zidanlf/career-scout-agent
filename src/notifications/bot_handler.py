@@ -352,7 +352,7 @@ async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"TAG   : {label}\n"
         f"URL   : {url[:50]}{'...' if len(url) > 50 else ''}"
         f"</pre>\n"
-        f"This URL will be scanned every 10 minutes."
+        f"This URL will be scanned in rotation every 1 minute."
     )
     
     logger.info(f"User {user_id} added monitored URL: id={new_id} tag={label}")

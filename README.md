@@ -123,12 +123,12 @@ Only jobs whose title contains at least one keyword will trigger a notification.
 
 ## Scheduling
 
-The bot scans continuously every **10 minutes** for **all users**:
+The bot runs a continuous scanner every **1 minute** with round-robin rotation:
 
-- Scrapes all monitored URLs for each user
-- Fetches RSS feeds for each user
-- Applies keyword filtering before sending notifications
-- Only new (unseen) jobs trigger notifications
+- **User Rotation**: Picks one active user per cycle (every 60 seconds).
+- **URL Rotation**: For the selected user, scans exactly **one monitored URL** in rotation per cycle.
+- **RSS Scan**: Scrapes the user's RSS feed.
+- **Filtering & Notification**: Applies keyword filtering and sends notifications for new (unseen) jobs only.
 
 ## Project Structure
 
