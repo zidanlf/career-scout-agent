@@ -62,6 +62,9 @@ SCAN_STATE = {
     "interval_minutes": SCAN_INTERVAL // 60,
 }
 
+# Global state to track which monitored URL index was last scanned for each user (URL Rotation)
+MONITOR_INDEX_STATE = {}
+
 # Timezone: WIB (UTC+7) - always use this for consistent scheduling
 WIB = timezone(timedelta(hours=7))
 
@@ -182,7 +185,18 @@ async def process_monitored_urls(bot_app, user_id: int = None, keywords: list[st
         logger.info("No monitored URLs to process")
         return summary
     
-    logger.info(f"Processing {len(monitored_urls)} monitored URLs")
+    # URL Rotation: process only ONE monitored URL per user per run cycle
+    if user_id:
+        idx = MONITOR_INDEX_STATE.get(user_id, 0)
+        idx = idx % len(monitored_urls)
+        selected_url_data = monitored_urls[idx]
+        MONITOR_INDEX_STATE[user_id] = idx + 1
+        
+        logger.info(f"Rotating URLs for user {user_id}: processing URL {idx + 1}/{len(monitored_urls)}")
+        urls_to_process = [selected_url_data]
+    else:
+        logger.info(f"Processing {len(monitored_urls)} monitored URLs")
+        urls_to_process = monitored_urls
     
     # If keywords not provided and user_id given, fetch from DB
     if keywords is None and user_id:
@@ -190,7 +204,7 @@ async def process_monitored_urls(bot_app, user_id: int = None, keywords: list[st
     elif keywords is None:
         keywords = []
     
-    for url_data in monitored_urls:
+    for url_data in urls_to_process:
         current_user_id = user_id if user_id else url_data.get("user_id")
         url = url_data["url"]
         

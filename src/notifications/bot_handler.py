@@ -326,9 +326,11 @@ async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "<b>Example:</b>\n"
             "<code>/monitor https://www.kalibrr.com/c/jobs?search=data%20engineer DE</code>\n\n"
             "<b>Supported platforms:</b>\n"
-            "- Kalibrr\n"
             "- LinkedIn\n"
-            "- Glints"
+            "- Jobstreet\n"
+            "- Dealls\n"
+            "- Glints\n"
+            "- Kalibrr"
         )
         return
     

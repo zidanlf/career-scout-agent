@@ -4,7 +4,7 @@ Telegram bot that automatically scrapes job listings from multiple platforms and
 
 ## Features
 
-- **Multi-platform scraping** — LinkedIn, Jobstreet, Dealls, and generic sites
+- **Multi-platform scraping** — LinkedIn, Jobstreet, Dealls, Glints, and Kalibrr
 - **RSS feed monitoring** via RSS-Bridge (self-hosted)
 - **URL monitoring** — track specific search result pages for new listings
 - **Scheduled hourly scans** with user rotation (even hours / odd hours)
@@ -16,7 +16,10 @@ Telegram bot that automatically scrapes job listings from multiple platforms and
 | Platform | Method | Notes |
 |----------|--------|-------|
 | LinkedIn | HTML scraping | Public job listings only |
-| Jobstreet | SEEK Search API + HTML fallback | Lightweight, no browser needed |
+| Jobstreet | TLS impersonation + HTML | curl_cffi for Cloudflare bypass |
+| Dealls | HTML scraping | Standard HTML parsing |
+| Glints | TLS impersonation + HTML | curl_cffi for anti-bot bypass |
+| Kalibrr | HTML scraping | Server-side rendered, no anti-bot |
 
 ## Prerequisites
 
