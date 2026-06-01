@@ -54,8 +54,8 @@ logger = logging.getLogger("main")
 ZIDAN_ID = int(os.getenv("ZIDAN_ID", "0"))
 PARTNER_ID = int(os.getenv("PARTNER_ID", "0"))
  
-# Scan interval in seconds (1 minute — near real-time)
-SCAN_INTERVAL = 60
+# Scan interval in seconds (2 minutes)
+SCAN_INTERVAL = 120
 
 # Global state for scheduling information
 SCAN_STATE = {
@@ -186,18 +186,8 @@ async def process_monitored_urls(bot_app, user_id: int = None, keywords: list[st
         logger.info("No monitored URLs to process")
         return summary
     
-    # URL Rotation: process only ONE monitored URL per user per run cycle
-    if user_id:
-        idx = MONITOR_INDEX_STATE.get(user_id, 0)
-        idx = idx % len(monitored_urls)
-        selected_url_data = monitored_urls[idx]
-        MONITOR_INDEX_STATE[user_id] = idx + 1
-        
-        logger.info(f"Rotating URLs for user {user_id}: processing URL {idx + 1}/{len(monitored_urls)}")
-        urls_to_process = [selected_url_data]
-    else:
-        logger.info(f"Processing {len(monitored_urls)} monitored URLs")
-        urls_to_process = monitored_urls
+    logger.info(f"Processing {len(monitored_urls)} monitored URLs for user {user_id if user_id else 'All'}")
+    urls_to_process = monitored_urls
     
     # If keywords not provided and user_id given, fetch from DB
     if keywords is None and user_id:
@@ -205,7 +195,7 @@ async def process_monitored_urls(bot_app, user_id: int = None, keywords: list[st
     elif keywords is None:
         keywords = []
     
-    for url_data in urls_to_process:
+    for idx, url_data in enumerate(urls_to_process):
         current_user_id = user_id if user_id else url_data.get("user_id")
         url = url_data["url"]
         
@@ -216,13 +206,16 @@ async def process_monitored_urls(bot_app, user_id: int = None, keywords: list[st
             user_keywords = keywords
         
         try:
-            logger.info(f"Scraping URL for user {current_user_id}: {url[:50]}...")
+            logger.info(f"Scraping URL for user {current_user_id} ({idx + 1}/{len(urls_to_process)}): {url[:50]}...")
             
             # Scrape the URL
             jobs = await scrape_job_listings(url)
             
             if not jobs:
                 logger.info(f"No jobs found from URL: {url[:50]}...")
+                # Sleep if there are more URLs
+                if idx < len(urls_to_process) - 1:
+                    await asyncio.sleep(2)
                 continue
             
             summary["total_scraped"] += len(jobs)
@@ -262,9 +255,16 @@ async def process_monitored_urls(bot_app, user_id: int = None, keywords: list[st
             
             logger.info(f"URL processed: {summary['new_sent']} sent, {summary['filtered']} filtered")
             
+            # Sleep if there are more URLs to process
+            if idx < len(urls_to_process) - 1:
+                await asyncio.sleep(2)
+            
         except Exception as e:
             logger.error(f"Error processing URL {url[:50]}...: {e}")
             summary["errors"] += 1
+            # Sleep if there are more URLs to process
+            if idx < len(urls_to_process) - 1:
+                await asyncio.sleep(2)
             continue
     
     logger.info("=== Monitored URL scan completed ===")

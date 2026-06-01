@@ -1,13 +1,13 @@
 # Career Scout Agent
 
-Telegram bot that automatically scrapes job listings from multiple platforms and sends real-time notifications. Supports scheduled 1-minute rotation scans with multi-user round-robin.
+Telegram bot that automatically scrapes job listings from multiple platforms and sends real-time notifications. Supports scheduled 2-minute scans with multi-user round-robin.
 
 ## Features
 
-- **Multi-platform scraping** — LinkedIn, Jobstreet, Dealls, Glints, and Kalibrr
+- **Multi-platform scraping** — LinkedIn, Jobstreet, Glints, Kalibrr, Indeed, Loker.id, and KitaLulus
 - **RSS feed monitoring** via RSS-Bridge (self-hosted)
 - **URL monitoring** — track specific search result pages for new listings
-- **Scheduled 1-minute rotation scans** with user round-robin rotation
+- **Scheduled 2-minute scans** with user round-robin rotation
 - **Telegram bot interface** with whitelist security
 - **Deduplication** — only notifies for new job listings
 
@@ -17,9 +17,11 @@ Telegram bot that automatically scrapes job listings from multiple platforms and
 |----------|--------|-------|
 | LinkedIn | HTML scraping | Public job listings only |
 | Jobstreet | TLS impersonation + HTML | curl_cffi for Cloudflare bypass |
-| Dealls | HTML scraping | Standard HTML parsing |
 | Glints | TLS impersonation + HTML | curl_cffi for anti-bot bypass |
 | Kalibrr | HTML scraping | Server-side rendered, no anti-bot |
+| Indeed | TLS impersonation + HTML | curl_cffi for Cloudflare bypass |
+| Loker.id | HTML scraping | Standard HTML parsing |
+| KitaLulus | HTML scraping | Next.js HTML parsing |
 
 ## Prerequisites
 
@@ -123,10 +125,10 @@ Only jobs whose title contains at least one keyword will trigger a notification.
 
 ## Scheduling
 
-The bot runs a continuous scanner every **1 minute** with round-robin rotation:
+The bot runs a continuous scanner every **2 minutes** with round-robin rotation:
 
-- **User Rotation**: Picks one active user per cycle (every 60 seconds).
-- **URL Rotation**: For the selected user, scans exactly **one monitored URL** in rotation per cycle.
+- **User Rotation**: Picks one active user per cycle (every 2 minutes).
+- **All URL Scan**: For the selected user, scans **all monitored URLs** in a batch (with a 2-second delay between requests to prevent rate limiting).
 - **RSS Scan**: Scrapes the user's RSS feed.
 - **Filtering & Notification**: Applies keyword filtering and sends notifications for new (unseen) jobs only.
 

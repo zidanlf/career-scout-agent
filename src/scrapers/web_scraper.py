@@ -1,7 +1,7 @@
 """
 Web Scraper for Career Scout Agent
 Scrapes job listings from job search result pages.
-Supports LinkedIn, Jobstreet, Dealls, Glints, and Kalibrr.
+Supports LinkedIn, Jobstreet, Glints, Kalibrr, Indeed, Loker.id, and KitaLulus.
 """
 
 import hashlib
@@ -68,8 +68,12 @@ def _detect_platform(url: str) -> str:
         return "linkedin"
     elif "jobstreet" in domain:
         return "jobstreet"
-    elif "dealls" in domain:
-        return "dealls"
+    elif "indeed" in domain:
+        return "indeed"
+    elif "loker.id" in domain or "loker" in domain:
+        return "loker"
+    elif "kitalulus" in domain:
+        return "kitalulus"
     elif "glints" in domain:
         return "glints"
     elif "kalibrr" in domain:
@@ -430,64 +434,187 @@ def _parse_jobstreet_html(html: str, base_url: str) -> list[dict]:
     return jobs
 
 
-def _parse_dealls(html: str, base_url: str) -> list[dict]:
-    """Parse Dealls (dealls.com) job listings."""
+async def _scrape_indeed_html(url: str) -> list[dict]:
+    """Scrape Indeed job listings."""
     jobs = []
-    soup = BeautifulSoup(html, "lxml")
-    
-    # Dealls job cards - try multiple selectors
-    job_cards = soup.select(
-        "a[href*='/job/'], "
-        "a[href*='/jobs/'], "
-        "div[class*='JobCard'], "
-        "div[class*='job-card'], "
-        "div[class*='jobCard']"
-    )
-    
-    for card in job_cards:
+    html = None
+    if HAS_CURL_CFFI:
         try:
-            # Title
-            title_elem = card.select_one("h2, h3, h4, [class*='title'], [class*='Title']")
-            title = title_elem.get_text(strip=True) if title_elem else None
-            
-            # If card is a link itself, get text
-            if card.name == "a" and not title:
-                # Try to get the first meaningful text
-                for elem in card.find_all(["h2", "h3", "h4", "span", "p"]):
-                    text = elem.get_text(strip=True)
-                    if _is_valid_title(text) and len(text) > 5:
-                        title = text
-                        break
-            
+            async with CurlAsyncSession(impersonate="chrome") as s:
+                r = await s.get(url, timeout=30)
+                if r.status_code == 200:
+                    html = r.text
+        except Exception as e:
+            logger.error(f"Indeed curl_cffi error: {e}")
+    
+    if not html:
+        html = await _fetch_page(url)
+        
+    if not html:
+        logger.error(f"Failed to fetch Indeed page: {url}")
+        return []
+        
+    soup = BeautifulSoup(html, "lxml")
+    cards = soup.select("div.cardOutline, div.job_seen_beacon")
+    base_origin = "https://id.indeed.com" if "id.indeed.com" in url else "https://www.indeed.com"
+    
+    for card in cards:
+        try:
+            # Title & Link
+            link_elem = card.select_one("a.jcs-JobTitle, h3.jobTitle a")
+            if not link_elem:
+                continue
+            title = link_elem.get_text(strip=True)
             if not _is_valid_title(title):
                 continue
             
-            # Company
-            company = "Unknown Company"
-            company_selectors = [
-                "[class*='company']", "[class*='Company']",
-                "p", "span"
-            ]
-            for sel in company_selectors:
-                elem = card.select_one(sel)
-                if elem:
-                    text = elem.get_text(strip=True)
-                    if text and text != title and len(text) < 80 and _is_valid_title(text):
-                        company = text
-                        break
-            
-            # Link
-            if card.name == "a":
-                link = card.get("href", "")
-            else:
-                link_elem = card.select_one("a[href*='/job']")
-                link = link_elem.get("href", "") if link_elem else ""
-            
+            link = link_elem.get("href", "")
             if link and not link.startswith("http"):
-                link = f"https://dealls.com{link}"
-            
+                link = f"{base_origin}{link}"
+                
             if not link:
                 continue
+                
+            # Company
+            comp_elem = card.select_one('[data-testid="company-name"]')
+            company = comp_elem.get_text(strip=True) if comp_elem else "Unknown Company"
+            
+            # Location
+            loc_elem = card.select_one('[data-testid="text-location"]')
+            location = loc_elem.get_text(strip=True) if loc_elem else ""
+            
+            jobs.append({
+                "title": title,
+                "company": company,
+                "link": link,
+                "description": f"Lokasi: {location}" if location else "",
+                "hash": _generate_job_hash(link)
+            })
+        except Exception as e:
+            logger.debug(f"Error parsing Indeed HTML card: {e}")
+            continue
+            
+    jobs = _deduplicate_by_link(jobs)
+    logger.info(f"Indeed HTML: Found {len(jobs)} jobs")
+    return jobs
+
+
+async def _scrape_loker_id_html(url: str) -> list[dict]:
+    """Scrape Loker.id job listings."""
+    jobs = []
+    html = None
+    if HAS_CURL_CFFI:
+        try:
+            async with CurlAsyncSession(impersonate="chrome") as s:
+                r = await s.get(url, timeout=30)
+                if r.status_code == 200:
+                    html = r.text
+        except Exception as e:
+            logger.error(f"Loker.id curl_cffi error: {e}")
+            
+    if not html:
+        html = await _fetch_page(url)
+        
+    if not html:
+        logger.error(f"Failed to fetch Loker.id page: {url}")
+        return []
+        
+    soup = BeautifulSoup(html, "lxml")
+    cards = soup.select("article.card")
+    base_origin = "https://www.loker.id"
+    
+    for card in cards:
+        try:
+            # Title & Link
+            title_elem = card.select_one("h3")
+            link_elem = card.select_one('a[href$=".html"]')
+            if not title_elem or not link_elem:
+                continue
+                
+            title = title_elem.get_text(strip=True)
+            if not _is_valid_title(title):
+                continue
+                
+            link = link_elem.get("href", "")
+            if link and not link.startswith("http"):
+                link = f"{base_origin}{link}"
+                
+            if not link:
+                continue
+                
+            # Company
+            comp_elem = card.select_one("span.text-secondary-500")
+            company = comp_elem.get_text(strip=True) if comp_elem else "Unknown Company"
+            
+            # Location
+            loc_icon = card.select_one("svg.icon-tabler-map-pin")
+            location = ""
+            if loc_icon:
+                loc_span = loc_icon.parent.select_one("span")
+                if loc_span:
+                    location = loc_span.get_text(strip=True)
+                    
+            jobs.append({
+                "title": title,
+                "company": company,
+                "link": link,
+                "description": f"Lokasi: {location}" if location else "",
+                "hash": _generate_job_hash(link)
+            })
+        except Exception as e:
+            logger.debug(f"Error parsing Loker.id HTML card: {e}")
+            continue
+            
+    jobs = _deduplicate_by_link(jobs)
+    logger.info(f"Loker.id HTML: Found {len(jobs)} jobs")
+    return jobs
+
+
+async def _scrape_kitalulus_html(url: str) -> list[dict]:
+    """Scrape KitaLulus job listings."""
+    jobs = []
+    html = None
+    if HAS_CURL_CFFI:
+        try:
+            async with CurlAsyncSession(impersonate="chrome") as s:
+                r = await s.get(url, timeout=30)
+                if r.status_code == 200:
+                    html = r.text
+        except Exception as e:
+            logger.error(f"KitaLulus curl_cffi error: {e}")
+            
+    if not html:
+        html = await _fetch_page(url)
+        
+    if not html:
+        logger.error(f"Failed to fetch KitaLulus page: {url}")
+        return []
+        
+    soup = BeautifulSoup(html, "lxml")
+    cards = soup.select('a[href*="/lowongan/detail/"]')
+    base_origin = "https://kerja.kitalulus.com"
+    
+    for card in cards:
+        try:
+            # Title
+            title_elem = card.select_one("h3")
+            if not title_elem:
+                continue
+            title = title_elem.get_text(strip=True)
+            if not _is_valid_title(title):
+                continue
+                
+            # Link
+            link = card.get("href", "")
+            if link and not link.startswith("http"):
+                link = f"{base_origin}{link}"
+                
+            if not link:
+                continue
+                
+            # Company
+            comp_elem = card.select_one("p.text-neutral-700.truncate")
+            company = comp_elem.get_text(strip=True) if comp_elem else "Unknown Company"
             
             jobs.append({
                 "title": title,
@@ -496,13 +623,12 @@ def _parse_dealls(html: str, base_url: str) -> list[dict]:
                 "description": "",
                 "hash": _generate_job_hash(link)
             })
-            
         except Exception as e:
-            logger.debug(f"Error parsing Dealls card: {e}")
+            logger.debug(f"Error parsing KitaLulus HTML card: {e}")
             continue
-    
+            
     jobs = _deduplicate_by_link(jobs)
-    logger.info(f"Dealls: Found {len(jobs)} jobs")
+    logger.info(f"KitaLulus HTML: Found {len(jobs)} jobs")
     return jobs
 
 
@@ -1097,7 +1223,7 @@ async def scrape_job_listings(url: str) -> list[dict]:
     After listing scrape, fetches individual detail pages for full descriptions.
     
     Args:
-        url: Job search results URL (LinkedIn, Jobstreet, Dealls, Glints, Kalibrr, or other)
+        url: Job search results URL (LinkedIn, Jobstreet, Glints, Kalibrr, Indeed, Loker.id, KitaLulus, or other)
     
     Returns:
         List of job dicts: {title, company, link, description, hash, platform}
@@ -1117,6 +1243,12 @@ async def scrape_job_listings(url: str) -> list[dict]:
         jobs = await _scrape_jobstreet_html(url)
     elif platform == "glints":
         jobs = await _scrape_glints_html(url)
+    elif platform == "indeed":
+        jobs = await _scrape_indeed_html(url)
+    elif platform == "loker":
+        jobs = await _scrape_loker_id_html(url)
+    elif platform == "kitalulus":
+        jobs = await _scrape_kitalulus_html(url)
     else:
         # HTML-based platforms: fetch page and parse
         html = await _fetch_page(url)
@@ -1126,8 +1258,6 @@ async def scrape_job_listings(url: str) -> list[dict]:
         
         if platform == "linkedin":
             jobs = _parse_linkedin(html, url)
-        elif platform == "dealls":
-            jobs = _parse_dealls(html, url)
         elif platform == "kalibrr":
             jobs = _parse_kalibrr(html, url)
         else:

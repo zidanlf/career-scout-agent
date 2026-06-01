@@ -328,9 +328,11 @@ async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "<b>Supported platforms:</b>\n"
             "- LinkedIn\n"
             "- Jobstreet\n"
-            "- Dealls\n"
             "- Glints\n"
-            "- Kalibrr"
+            "- Kalibrr\n"
+            "- Indeed\n"
+            "- Loker.id\n"
+            "- KitaLulus"
         )
         return
     
@@ -352,7 +354,7 @@ async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"TAG   : {label}\n"
         f"URL   : {url[:50]}{'...' if len(url) > 50 else ''}"
         f"</pre>\n"
-        f"This URL will be scanned in rotation every 1 minute."
+        f"All your monitored URLs will be scanned every 2 minutes when it's your turn."
     )
     
     logger.info(f"User {user_id} added monitored URL: id={new_id} tag={label}")
