@@ -26,6 +26,7 @@ from src.database.db_manager import (
     log_processed_job,
     get_all_monitored_urls,
     check_job_processed,
+    clean_old_jobs,
 )
 from src.scrapers.rss_parser import get_fresh_jobs
 from src.scrapers.web_scraper import scrape_job_listings
@@ -299,6 +300,12 @@ async def scheduled_scan(bot_app) -> None:
     
     while True:
         try:
+            # Auto-clean expired jobs older than 7 days
+            try:
+                await clean_old_jobs()
+            except Exception as e:
+                logger.error(f"Failed to run periodic database cleanup: {e}")
+
             now = datetime.now(WIB)
             logger.info(f"=== Scheduled scan starting at {now.strftime('%H:%M:%S')} ===")
             
@@ -369,6 +376,12 @@ async def main() -> None:
     
     # Initialize database
     await init_db()
+    
+    # Auto-clean expired jobs older than 7 days on startup
+    try:
+        await clean_old_jobs()
+    except Exception as e:
+        logger.error(f"Failed to run startup database cleanup: {e}")
     
     # Create bot application
     app = create_bot_application(bot_token)

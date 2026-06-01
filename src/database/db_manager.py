@@ -54,9 +54,19 @@ async def init_db() -> None:
                 job_hash TEXT,
                 user_id INTEGER REFERENCES users(telegram_id) ON DELETE CASCADE,
                 found_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(job_hash, user_id)
             )
         """)
+        
+        # Migration: add created_at column if missing (for existing DBs)
+        try:
+            await db.execute("ALTER TABLE processed_jobs ADD COLUMN created_at TIMESTAMP")
+            await db.execute("UPDATE processed_jobs SET created_at = found_at WHERE created_at IS NULL")
+            await db.commit()
+            logger.info("Migrated: added 'created_at' column to processed_jobs table")
+        except Exception:
+            pass  # Column already exists
         
         # Monitored URLs table for web discovery
         await db.execute("""
@@ -210,7 +220,7 @@ async def log_processed_job(job_hash: str, user_id: int) -> None:
     """Log a processed job for deduplication."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT OR IGNORE INTO processed_jobs (job_hash, user_id) VALUES (?, ?)",
+            "INSERT OR IGNORE INTO processed_jobs (job_hash, user_id, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
             (job_hash, user_id)
         )
         await db.commit()
@@ -227,6 +237,22 @@ async def clear_processed_jobs(user_id: int) -> int:
         await db.commit()
         count = cursor.rowcount
         logger.info(f"Cleared {count} processed jobs for user {user_id}")
+        return count
+
+
+async def clean_old_jobs(days: int = 7) -> int:
+    """
+    Auto-clean jobs older than `days` days to keep database slim.
+    Uses the created_at column.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            f"DELETE FROM processed_jobs WHERE created_at < datetime('now', '-{days} days')"
+        )
+        await db.commit()
+        count = cursor.rowcount
+        if count > 0:
+            logger.info(f"Auto-cleaned {count} expired jobs older than {days} days")
         return count
 
 
