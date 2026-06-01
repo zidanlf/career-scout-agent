@@ -1102,6 +1102,12 @@ async def scrape_job_listings(url: str) -> list[dict]:
     Returns:
         List of job dicts: {title, company, link, description, hash, platform}
     """
+    # Normalize Jobstreet URLs to id.jobstreet.com to prevent home-page redirection loops on old domain
+    if "jobstreet.co.id" in url:
+        original_url = url
+        url = url.replace("www.jobstreet.co.id", "id.jobstreet.com").replace("jobstreet.co.id", "id.jobstreet.com")
+        logger.info(f"Normalized Jobstreet URL: {original_url} -> {url}")
+
     logger.info(f"Scraping URL: {url}")
     
     # Detect platform
