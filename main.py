@@ -300,7 +300,7 @@ async def scheduled_scan(bot_app) -> None:
     
     while True:
         try:
-            # Auto-clean expired jobs older than 7 days
+            # Auto-clean expired jobs older than 30 days
             try:
                 await clean_old_jobs()
             except Exception as e:
@@ -377,7 +377,7 @@ async def main() -> None:
     # Initialize database
     await init_db()
     
-    # Auto-clean expired jobs older than 7 days on startup
+    # Auto-clean expired jobs older than 30 days on startup
     try:
         await clean_old_jobs()
     except Exception as e:

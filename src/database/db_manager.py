@@ -240,7 +240,7 @@ async def clear_processed_jobs(user_id: int) -> int:
         return count
 
 
-async def clean_old_jobs(days: int = 7) -> int:
+async def clean_old_jobs(days: int = 30) -> int:
     """
     Auto-clean jobs older than `days` days to keep database slim.
     Uses the created_at column.
