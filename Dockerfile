@@ -1,28 +1,37 @@
-# Use official lightweight Python image
-FROM python:3.11-slim
+# Builder stage
+FROM rust:1.80-slim-bookworm as builder
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies (curl_cffi needs ca-certificates)
+# Copy Cargo configuration files
+COPY Cargo.toml Cargo.lock ./
+
+# Create dummy main.rs to pre-build dependencies for caching
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release
+
+# Copy the actual source files
+COPY src ./src
+
+# Rebuild with actual source files
+RUN touch src/main.rs && cargo build --release
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+# Install runtime dependencies (ca-certificates for HTTPS/SSL and sqlite3)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file first for layer caching
-COPY requirements.txt .
+# Copy compiled binary from builder stage
+COPY --from=builder /app/target/release/career-scout-agent /app/career-scout-agent
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the rest of the application code
-COPY . .
-
-# Create volume mount points for database and logs to persist data
+# Create directories for data and logs
 RUN mkdir -p /app/data /app/logs
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-
-# Run the main application orchestrator
-CMD ["python", "main.py"]
+# Set container entrypoint
+CMD ["/app/career-scout-agent"]
