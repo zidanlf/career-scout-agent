@@ -1,206 +1,158 @@
-# Career Scout Agent
+# Career Scout Agent (Rust Version)
 
-Telegram bot that automatically scrapes job listings from multiple platforms and sends real-time notifications. Supports scheduled 2-minute scans with multi-user round-robin.
+A high-performance, lightweight Telegram bot rewritten in pure Rust that automatically scrapes job listings from multiple platforms and sends real-time notifications. Featuring structured round-robin scheduling, whitelist security, and database volume persistence.
 
 ## Features
 
-- **Multi-platform scraping** — LinkedIn, Jobstreet, Glints, Kalibrr, Indeed, Loker.id, and KitaLulus
-- **RSS feed monitoring** via RSS-Bridge (self-hosted)
-- **URL monitoring** — track specific search result pages for new listings
-- **Scheduled 2-minute scans** with user round-robin rotation
-- **Telegram bot interface** with whitelist security
-- **Deduplication** — only notifies for new job listings
+- **High Performance & Safety** — Built in Rust, offering extremely low memory and CPU footprint compared to the legacy Python implementation.
+- **Multi-platform scraping** — LinkedIn, Jobstreet, Glints, Kalibrr, Indeed, Loker.id, and KitaLulus.
+- **RSS Feed Parser** — Parse and monitor personalized RSS feeds with fallback title filtering.
+- **URL Monitoring** — Monitor specific search result pages from target job boards for new listings.
+- **Keyword Filtering** — Restrict job alerts to specific roles matching user-defined keywords (case-insensitive, partial matching).
+- **Control Commands** — `/pause` and `/resume` scanning dynamically per user.
+- **Whitelist Protection** — Restrict bot access exclusively to authorized Telegram IDs.
+- **Deduplication** — Prevent duplicate notifications using MD5 job hashing and SQLite persistence.
+- **Optimized Scheduling** — Periodic scans (default: 2 minutes) executing round-robin rotation for active users with a 2-second rate-limiting delay between network requests.
+
+---
 
 ## Supported Platforms
 
-| Platform | Method | Notes |
-|----------|--------|-------|
-| LinkedIn | HTML scraping | Public job listings only |
-| Jobstreet | TLS impersonation + HTML | curl_cffi for Cloudflare bypass |
-| Glints | TLS impersonation + HTML | curl_cffi for anti-bot bypass |
-| Kalibrr | HTML scraping | Server-side rendered, no anti-bot |
-| Indeed | TLS impersonation + HTML | curl_cffi for Cloudflare bypass |
-| Loker.id | HTML scraping | Standard HTML parsing |
-| KitaLulus | HTML scraping | Next.js HTML parsing |
+| Platform | Method | Bypass / Parser |
+|----------|--------|-----------------|
+| **LinkedIn** | HTML Scraping | Standard HTTP & HTML Selector Parsing |
+| **Jobstreet** | HTML Scraping | Custom Web Scraping via Scraper Crate |
+| **Glints** | HTML Scraping | Custom Web Scraping via Scraper Crate |
+| **Kalibrr** | HTML Scraping | Standard HTML Parser |
+| **Indeed** | HTML Scraping | Custom Web Scraping via Scraper Crate |
+| **Loker.id** | HTML Scraping | Standard HTML Selector Parser |
+| **KitaLulus** | HTML Scraping | Standard HTML Selector Parser |
+
+---
 
 ## Prerequisites
 
-- Python 3.10+
-- A Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
-- RSS-Bridge instance (self-hosted, for RSS feed support)
+- **Rust toolchain** (Rust 1.88+ or latest stable)
+- **Docker** (for containerized deployment)
+- **Telegram Bot Token** (from [@BotFather](https://t.me/BotFather))
 
-## Setup
+---
 
-### 1. Clone and install
+## Setup & Local Development
 
+### 1. Clone the Repository
 ```bash
 git clone https://github.com/zidanlf/career-scout-agent.git
 cd career-scout-agent
-python -m venv venv
-source venv/bin/activate        # Linux/Mac
-# venv\Scripts\activate         # Windows
-pip install -r requirements.txt
 ```
 
-### 2. Configure environment
-
-Create a `.env` file in the project root:
-
+### 2. Configure the Environment
+Create a `.env` file in the root directory:
 ```env
-# Telegram Bot
+# Telegram Bot Token
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 
-# Authorized User IDs (whitelist)
-ZIDAN_ID=your_telegram_user_id
-OTHER_USER_ID=other_user_telegram_id
+# Authorized User IDs (comma-separated whitelist)
+ZIDAN_ID=123456789,987654321
 
-# RSS-Bridge (optional, for /setrss)
-RSS_BRIDGE_URL=http://localhost:3000
+# Scan interval in seconds (default: 120 / 2 minutes)
+SCAN_INTERVAL=120
 ```
 
-### 3. Run
-
+### 3. Run Locally
 ```bash
-python main.py
+cargo run --release
 ```
+
+To run unit tests:
+```bash
+cargo test
+```
+
+---
+
+## Deployment (Docker)
+
+The project includes a multi-stage `Dockerfile` that builds a highly secure and optimized Debian-slim container.
+
+### 1. Build the Docker Image
+```bash
+docker build -t career-bot .
+```
+
+### 2. Run Container with Volume Persistence
+To ensure that your SQLite database (`scout.db`) and logs are preserved across updates, mount the `data` and `logs` directories:
+```bash
+docker run -d \
+  --name career-scout-running \
+  --restart always \
+  --env-file .env \
+  -v "$(pwd)/data:/app/data" \
+  -v "$(pwd)/logs:/app/logs" \
+  career-bot
+```
+
+---
 
 ## Bot Commands
 
 ### Keyword Filtering
+| Command | Description | Example |
+|---------|-------------|---------|
+| `/setkeywords <k1>, <k2>` | Set role filter keywords | `/setkeywords rust, python, remote` |
+| `/listkeywords` | View active keywords | `/listkeywords` |
+| `/delkeywords` | Delete all keywords | `/delkeywords` |
 
-| Command | Description |
-|---------|-------------|
-| `/setkeywords <k1>, <k2>` | Set role filter keywords |
-| `/listkeywords` | Show active keywords |
-| `/delkeywords` | Remove all keywords |
-
-### RSS Feed
-
-| Command | Description |
-|---------|-------------|
-| `/start` | Register and show help |
-| `/setrss <url>` | Set RSS feed URL |
-| `/delrss` | Remove RSS feed |
-| `/scanrss` | Scan RSS feed now |
+### RSS Feed Settings
+| Command | Description | Example |
+|---------|-------------|---------|
+| `/setrss <url>` | Set your RSS feed URL | `/setrss https://rss.example.com/feed` |
+| `/delrss` | Delete RSS feed | `/delrss` |
+| `/scanrss` | Scan RSS feed immediately | `/scanrss` |
 
 ### URL Monitoring
+| Command | Description | Example |
+|---------|-------------|---------|
+| `/monitor <url> <tag>` | Monitor a search URL with a label | `/monitor https://jobstreet.co.id/... backend` |
+| `/listmonitor` | List monitored URLs | `/listmonitor` |
+| `/delmonitor <id>` | Delete monitored URL by ID | `/delmonitor 3` |
+| `/scanmonitor` | Scan monitored URLs immediately | `/scanmonitor` |
 
-| Command | Description |
-|---------|-------------|
-| `/monitor <url> <tag>` | Add a URL to monitor |
-| `/listmonitor` | List all monitored URLs |
-| `/delmonitor <id>` | Remove a monitored URL |
-| `/scanmonitor` | Scan all monitored URLs now |
+### System & Control
+| Command | Description | Example |
+|---------|-------------|---------|
+| `/start` | Register and show welcome guide | `/start` |
+| `/status` | View scan status & active keywords | `/status` |
+| `/report` | Get 24-hour job posting summary | `/report` |
+| `/clearjobs` | Reset job history database | `/clearjobs` |
+| `/pause` | Pause automatic scanning loop | `/pause` |
+| `/resume` | Resume automatic scanning loop | `/resume` |
 
-### Info & Utilities
-
-| Command | Description |
-|---------|-------------|
-| `/status` | System status + keywords |
-| `/report` | 24-hour job summary |
-| `/clearjobs` | Reset job history (re-discover all jobs) |
-
-## Notification Format
-
-```
-Job Found in Jobstreet!
-
-Role    : Data Engineer
-Company : PT Tokopedia
-
-Apply Here
-```
-
-Each notification includes the platform name, job role, company name, and a clickable apply link. The information is displayed in a monospace box with aligned colons for readability.
-
-## Keyword Filtering
-
-Users can set keywords to filter job notifications by role title:
-
-```
-/setkeywords data, etl, engineer
-```
-
-Only jobs whose title contains at least one keyword will trigger a notification. Matching is **case-insensitive** and **partial** (e.g. keyword `data` matches "Data Engineer", "Big Data Analyst"). If no keywords are set, all jobs are shown.
-
-## Scheduling
-
-The bot runs a continuous scanner every **2 minutes** with round-robin rotation:
-
-- **User Rotation**: Picks one active user per cycle (every 2 minutes).
-- **All URL Scan**: For the selected user, scans **all monitored URLs** in a batch (with a 2-second delay between requests to prevent rate limiting).
-- **RSS Scan**: Scrapes the user's RSS feed.
-- **Filtering & Notification**: Applies keyword filtering and sends notifications for new (unseen) jobs only.
+---
 
 ## Project Structure
 
 ```
 career-scout-agent/
-├── main.py                     # Entry point, scheduler, orchestrator
-├── requirements.txt            # Python dependencies
-├── .env                        # Credentials (not in git)
+├── Cargo.toml          # Rust project configuration & dependencies
+├── Cargo.lock          # Locked versions of dependencies
+├── Dockerfile          # Multi-stage Docker deployment build
+├── README.md           # Documentation
+├── .env                # Secret environment variables (not in git)
 ├── data/
-│   └── scout.db                # SQLite database
+│   └── scout.db        # SQLite database (persisted via docker volume)
 ├── logs/
-│   └── scout.log               # Application logs
+│   └── scout.log       # Application logs (persisted via docker volume)
 └── src/
-    ├── database/
-    │   └── db_manager.py       # SQLite operations (users, jobs, URLs)
-    ├── scrapers/
-    │   ├── rss_parser.py       # RSS feed parser
-    │   └── web_scraper.py      # Multi-platform job scraper
-    └── notifications/
-        └── bot_handler.py      # Telegram bot commands & handlers
+    ├── main.rs         # Entry point, config loaders, scheduler loop
+    ├── bot.rs          # Teloxide bot commands & telegram response handling
+    ├── database.rs     # SQLx async database queries & migrations
+    ├── scraper.rs      # HTML selectors, parsers, and scraper client
+    └── config.rs       # Environment configuration loading & WIB time utils
 ```
 
-## Database Tables
-
-| Table | Purpose |
-|-------|---------|
-| `users` | Registered users with RSS URL |
-| `processed_jobs` | Deduplication tracking (job_hash + user_id) |
-| `monitored_urls` | Saved search URLs for periodic scanning |
-
-## Deployment (systemd)
-
-Create `/etc/systemd/system/career-scout.service`:
-
-```ini
-[Unit]
-Description=Career Scout Agent
-After=network.target
-
-[Service]
-Type=simple
-User=your_user
-WorkingDirectory=/home/your_user/career-scout-agent
-ExecStart=/home/your_user/career-scout-agent/venv/bin/python main.py
-Restart=always
-RestartSec=10
-Environment=PATH=/home/your_user/career-scout-agent/venv/bin:/usr/bin
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable career-scout
-sudo systemctl start career-scout
-```
-
-## Dependencies
-
-| Package | Purpose |
-|---------|---------|
-| `python-telegram-bot` | Telegram Bot API |
-| `aiosqlite` | Async SQLite database |
-| `httpx` | HTTP client for API/HTML scraping |
-| `beautifulsoup4` | HTML parsing |
-| `lxml` | Fast HTML parser backend |
-| `python-dotenv` | Environment variable loading |
+---
 
 ## License
 
-MIT
-
+This project is licensed under the MIT License.

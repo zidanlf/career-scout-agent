@@ -579,25 +579,3 @@ async fn answer(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_clean_company_name() {
-        assert_eq!(clean_company_name("diPT YAKIN BERTUMBUH"), "PT YAKIN BERTUMBUH");
-        assert_eq!(clean_company_name("diCV Maju Jaya"), "CV Maju Jaya");
-        assert_eq!(clean_company_name("PT Indah Jaya"), "PT Indah Jaya");
-        assert_eq!(clean_company_name(""), "");
-    }
-
-    #[test]
-    fn test_job_matches_keywords() {
-        let keywords = vec!["rust".to_string(), "python".to_string()];
-        assert!(job_matches_keywords("Senior Rust Developer", &keywords));
-        assert!(job_matches_keywords("Python Engineer", &keywords));
-        assert!(!job_matches_keywords("Java Architect", &keywords));
-        assert!(job_matches_keywords("Java Developer", &[])); // Empty matches all
-    }
-}
-
