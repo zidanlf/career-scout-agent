@@ -140,23 +140,27 @@ async fn answer(
             let welcome = format!(
                 "<b>Welcome, {}!</b>\n\
                 You have been registered in Career Scout.\n\n\
-                <b>Keywords</b>\n\
+                <b>🔍 Keywords</b>\n\
                 /setkeywords &lt;k1&gt;, &lt;k2&gt; - Set role filter keywords\n\
                 /listkeywords - Show active keywords\n\
                 /delkeywords - Remove all keywords\n\n\
-                <b>RSS Feed</b>\n\
+                <b>🚫 Banned Keywords</b>\n\
+                /setbanned &lt;k1&gt;, &lt;k2&gt; - Exclude jobs containing these words\n\
+                /listbanned - Show banned keywords\n\
+                /delbanned - Remove all banned keywords\n\n\
+                <b>📡 RSS Feed</b>\n\
                 /setrss &lt;url&gt; - Set RSS feed URL\n\
                 /delrss - Remove RSS feed\n\
                 /scanrss - Scan RSS feed now\n\n\
-                <b>URL Monitoring</b>\n\
+                <b>🔗 URL Monitoring</b>\n\
                 /monitor &lt;url&gt; &lt;tag&gt; - Add URL to monitor\n\
                 /listmonitor - List monitored URLs\n\
                 /delmonitor &lt;id&gt; - Remove monitored URL\n\
                 /scanmonitor - Scan all monitored URLs now\n\n\
-                <b>Control</b>\n\
+                <b>⚙️ Control</b>\n\
                 /pause - Pause auto-scanning\n\
                 /resume - Resume auto-scanning\n\n\
-                <b>Info</b>\n\
+                <b>📊 Info</b>\n\
                 /status - System status\n\
                 /report - 24h summary\n\
                 /clearjobs - Reset job history (re-discover all jobs)",
