@@ -85,6 +85,15 @@ async fn fetch_page(url: &str) -> Option<String> {
         .header("User-Agent", user_agent)
         .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
         .header("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
+        .header("Accept-Encoding", "gzip, deflate, br")
+        .header("sec-ch-ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"")
+        .header("sec-ch-ua-mobile", "?0")
+        .header("sec-ch-ua-platform", "\"Windows\"")
+        .header("sec-fetch-dest", "document")
+        .header("sec-fetch-mode", "navigate")
+        .header("sec-fetch-site", "none")
+        .header("sec-fetch-user", "?1")
+        .header("upgrade-insecure-requests", "1")
         .send()
         .await 
     {

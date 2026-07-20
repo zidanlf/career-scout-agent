@@ -23,6 +23,12 @@ pub enum Command {
     ListKeywords,
     #[command(description = "Delete all keyword filters.")]
     DelKeywords,
+    #[command(description = "Set banned/excluded keywords.")]
+    SetBanned(String),
+    #[command(description = "List banned keywords.")]
+    ListBanned,
+    #[command(description = "Delete all banned keywords.")]
+    DelBanned,
     #[command(description = "Show system status.")]
     Status,
     #[command(description = "Show 24h summary.")]
@@ -74,12 +80,19 @@ pub fn format_job_notification(job: &ScrapedJob) -> String {
     )
 }
 
-pub fn job_matches_keywords(title: &str, keywords: &[String]) -> bool {
-    if keywords.is_empty() {
-        return true;
-    }
+pub fn job_matches_filters(title: &str, keywords: &[String], banned_keywords: &[String]) -> bool {
     let title_lower = title.to_lowercase();
-    keywords.iter().any(|kw| title_lower.contains(kw))
+    if banned_keywords.iter().any(|banned| title_lower.contains(banned)) {
+        return false;
+    }
+    if !keywords.is_empty() {
+        return keywords.iter().any(|kw| title_lower.contains(kw));
+    }
+    true
+}
+
+pub fn job_matches_keywords(title: &str, keywords: &[String]) -> bool {
+    job_matches_filters(title, keywords, &[])
 }
 
 pub async fn start_bot(bot: Bot, db: Database, config: Arc<Config>) {
@@ -247,11 +260,73 @@ async fn answer(
             }
             bot.send_message(msg.chat.id, "<b>Keywords removed.</b>\n\nAll jobs will now be notified without filtering.").parse_mode(ParseMode::Html).await?;
         }
+        Command::SetBanned(args) => {
+            if args.trim().is_empty() {
+                bot.send_message(
+                    msg.chat.id,
+                    "<b>Usage:</b> <code>/setbanned &lt;k1&gt;, &lt;k2&gt;</code>\n\n\
+                     <b>Example:</b> <code>/setbanned manager, senior, lead</code>"
+                )
+                .parse_mode(ParseMode::Html)
+                .await?;
+                return Ok(());
+            }
+
+            let kws: Vec<String> = args
+                .split(',')
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .collect();
+
+            let clean_str = kws.join(", ");
+            if let Err(e) = db.update_banned_keywords(user_id, &clean_str).await {
+                error!("Database error updating banned keywords: {}", e);
+                bot.send_message(msg.chat.id, "Database error updating banned keywords.").await?;
+                return Ok(());
+            }
+
+            bot.send_message(
+                msg.chat.id,
+                format!("<b>Banned Keywords Updated</b>\n\n<pre>Banned Keywords : {}</pre>\n\nJobs with titles containing these keywords will be excluded.", kws.join(", "))
+            )
+            .parse_mode(ParseMode::Html)
+            .await?;
+        }
+        Command::ListBanned => {
+            match db.get_user_banned_keywords(user_id).await {
+                Ok(kws) => {
+                    if kws.is_empty() {
+                        bot.send_message(msg.chat.id, "No banned keywords set.").await?;
+                    } else {
+                        bot.send_message(
+                            msg.chat.id,
+                            format!("<b>Your Banned Keywords</b>\n\n<pre>{}</pre>", kws.join(", "))
+                        )
+                        .parse_mode(ParseMode::Html)
+                        .await?;
+                    }
+                }
+                Err(e) => {
+                    error!("Database error: {}", e);
+                    bot.send_message(msg.chat.id, "Database error fetching banned keywords.").await?;
+                }
+            }
+        }
+        Command::DelBanned => {
+            if let Err(e) = db.delete_banned_keywords(user_id).await {
+                error!("Database error: {}", e);
+                bot.send_message(msg.chat.id, "Database error deleting banned keywords.").await?;
+                return Ok(());
+            }
+            bot.send_message(msg.chat.id, "<b>Banned keywords removed.</b>\n\nNo job titles will be excluded.").parse_mode(ParseMode::Html).await?;
+        }
         Command::Status => {
             let rss_url = db.get_user_rss(user_id).await.unwrap_or(None);
             let rss_status = if rss_url.is_some() { "Configured" } else { "Not configured" };
             let keywords = db.get_user_keywords(user_id).await.unwrap_or_default();
             let kw_display = if keywords.is_empty() { "None (all jobs shown)".to_string() } else { keywords.join(", ") };
+            let banned_keywords = db.get_user_banned_keywords(user_id).await.unwrap_or_default();
+            let banned_display = if banned_keywords.is_empty() { "None".to_string() } else { banned_keywords.join(", ") };
             let is_active = db.get_user_active(user_id).await.unwrap_or(true);
             let scan_status = if is_active { "✅ Active" } else { "⏸ Paused" };
             let db_stats = db.get_db_stats().await.unwrap_or_default();
@@ -261,7 +336,8 @@ async fn answer(
                 <b>Your Profile:</b>\n\
                 - Scanning: {}\n\
                 - RSS Feed: {}\n\
-                - Keywords: {}\n\n\
+                - Keywords: {}\n\
+                - Banned Keywords: {}\n\n\
                 <b>Database Statistics:</b>\n\
                 - Users: {}\n\
                 - Jobs Processed: {}\n\
@@ -269,6 +345,7 @@ async fn answer(
                 scan_status,
                 rss_status,
                 kw_display,
+                banned_display,
                 db_stats.get("users").unwrap_or(&0),
                 db_stats.get("processed_jobs").unwrap_or(&0),
                 db_stats.get("monitored_urls").unwrap_or(&0)
@@ -409,6 +486,7 @@ async fn answer(
             }
 
             let keywords = db.get_user_keywords(user_id).await.unwrap_or_default();
+            let banned_keywords = db.get_user_banned_keywords(user_id).await.unwrap_or_default();
             let mut total_scraped = 0;
             let mut new_sent = 0;
             let mut already_processed = 0;
@@ -429,7 +507,7 @@ async fn answer(
                             }
 
                             let _ = db.log_processed_job(&job.hash, user_id).await;
-                            if job_matches_keywords(&job.title, &keywords) {
+                            if job_matches_filters(&job.title, &keywords, &banned_keywords) {
                                 let text = format_job_notification(&job);
                                 if let Err(e) = bot.send_message(msg.chat.id, text)
                                     .parse_mode(ParseMode::Html)

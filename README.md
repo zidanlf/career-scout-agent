@@ -103,6 +103,13 @@ docker run -d \
 | `/listkeywords` | View active keywords | `/listkeywords` |
 | `/delkeywords` | Delete all keywords | `/delkeywords` |
 
+### Banned Keywords (Negative Filtering)
+| Command | Description | Example |
+|---------|-------------|---------|
+| `/setbanned <k1>, <k2>` | Exclude jobs containing any of these words | `/setbanned manager, senior, lead` |
+| `/listbanned` | View active banned keywords | `/listbanned` |
+| `/delbanned` | Delete all banned keywords | `/delbanned` |
+
 ### RSS Feed Settings
 | Command | Description | Example |
 |---------|-------------|---------|

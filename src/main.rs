@@ -11,7 +11,7 @@ use tokio::time::{sleep, Duration};
 
 use crate::config::Config;
 use crate::database::Database;
-use crate::bot::{start_bot, format_job_notification, job_matches_keywords};
+use crate::bot::{start_bot, format_job_notification, job_matches_filters};
 use crate::scraper::{scrape_job_listings, parse_rss_jobs};
 
 async fn scheduled_scan_loop(bot: Bot, db: Database, config: Arc<Config>) {
@@ -43,10 +43,11 @@ async fn scheduled_scan_loop(bot: Bot, db: Database, config: Arc<Config>) {
                         let user_id = user.telegram_id;
                         let user_name = user.name.as_deref().unwrap_or("Unknown");
                         let keywords = db.get_user_keywords(user_id).await.unwrap_or_default();
+                        let banned_keywords = db.get_user_banned_keywords(user_id).await.unwrap_or_default();
 
                         info!(
-                            "--- Scanning for {} (ID: {}, turn: {}/{}, keywords: {:?}) ---",
-                            user_name, user_id, scan_index + 1, active_users.len(), keywords
+                            "--- Scanning for {} (ID: {}, turn: {}/{}, keywords: {:?}, banned: {:?}) ---",
+                            user_name, user_id, scan_index + 1, active_users.len(), keywords, banned_keywords
                         );
 
                         // 1. RSS Scan
@@ -58,7 +59,7 @@ async fn scheduled_scan_loop(bot: Bot, db: Database, config: Arc<Config>) {
                                         for job in jobs {
                                             if !db.check_job_processed(&job.hash, user_id).await.unwrap_or(false) {
                                                 let _ = db.log_processed_job(&job.hash, user_id).await;
-                                                if job_matches_keywords(&job.title, &keywords) {
+                                                if job_matches_filters(&job.title, &keywords, &banned_keywords) {
                                                     let text = format_job_notification(&job);
                                                     if let Err(e) = bot.send_message(ChatId(user_id), text)
                                                         .parse_mode(ParseMode::Html)
@@ -98,7 +99,7 @@ async fn scheduled_scan_loop(bot: Bot, db: Database, config: Arc<Config>) {
                                                 for job in jobs {
                                                     if !db.check_job_processed(&job.hash, user_id).await.unwrap_or(false) {
                                                         let _ = db.log_processed_job(&job.hash, user_id).await;
-                                                        if job_matches_keywords(&job.title, &keywords) {
+                                                        if job_matches_filters(&job.title, &keywords, &banned_keywords) {
                                                             let text = format_job_notification(&job);
                                                             if let Err(e) = bot.send_message(ChatId(user_id), text)
                                                                 .parse_mode(ParseMode::Html)

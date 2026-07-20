@@ -8,6 +8,7 @@ pub struct DbUser {
     pub name: Option<String>,
     pub rss_url: Option<String>,
     pub keywords: Option<String>,
+    pub banned_keywords: Option<String>,
     pub active: i32,
 }
 
@@ -44,12 +45,18 @@ impl Database {
                 name TEXT,
                 rss_url TEXT,
                 keywords TEXT,
+                banned_keywords TEXT,
                 active INTEGER DEFAULT 1
             )"
         ).execute(&pool).await?;
 
         // Migration: add keywords column if missing
         let _ = sqlx::query("ALTER TABLE users ADD COLUMN keywords TEXT")
+            .execute(&pool)
+            .await;
+
+        // Migration: add banned_keywords column if missing
+        let _ = sqlx::query("ALTER TABLE users ADD COLUMN banned_keywords TEXT")
             .execute(&pool)
             .await;
             
@@ -118,7 +125,7 @@ impl Database {
 
     pub async fn get_all_users(&self) -> Result<Vec<DbUser>, sqlx::Error> {
         let rows = sqlx::query_as::<_, DbUser>(
-            "SELECT telegram_id, name, rss_url, keywords, active FROM users"
+            "SELECT telegram_id, name, rss_url, keywords, banned_keywords, active FROM users"
         )
         .fetch_all(&self.pool)
         .await?;
@@ -150,6 +157,43 @@ impl Database {
             .execute(&self.pool)
             .await?;
         info!("Keywords updated for user {}: {:?}", telegram_id, kw_val);
+        Ok(())
+    }
+
+    pub async fn get_user_banned_keywords(&self, telegram_id: i64) -> Result<Vec<String>, sqlx::Error> {
+        let row = sqlx::query("SELECT banned_keywords FROM users WHERE telegram_id = ?")
+            .bind(telegram_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        
+        let kw_str = match row.and_then(|r| r.get::<Option<String>, _>("banned_keywords")) {
+            Some(s) => s,
+            None => return Ok(vec![]),
+        };
+        
+        Ok(kw_str.split(',')
+            .map(|k| k.trim().to_lowercase())
+            .filter(|k| !k.is_empty())
+            .collect())
+    }
+
+    pub async fn update_banned_keywords(&self, telegram_id: i64, keywords_str: &str) -> Result<(), sqlx::Error> {
+        let kw_val = if keywords_str.trim().is_empty() { None } else { Some(keywords_str) };
+        sqlx::query("UPDATE users SET banned_keywords = ? WHERE telegram_id = ?")
+            .bind(kw_val)
+            .bind(telegram_id)
+            .execute(&self.pool)
+            .await?;
+        info!("Banned keywords updated for user {}: {:?}", telegram_id, kw_val);
+        Ok(())
+    }
+
+    pub async fn delete_banned_keywords(&self, telegram_id: i64) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE users SET banned_keywords = NULL WHERE telegram_id = ?")
+            .bind(telegram_id)
+            .execute(&self.pool)
+            .await?;
+        info!("Banned keywords deleted for user {}", telegram_id);
         Ok(())
     }
 
