@@ -20,3 +20,4 @@ teloxide = { version = "0.17.0", default-features = false, features = ["macros",
 tokio = { version = "1.52.3", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 url = "2.5.8"
+urlencoding = "2.1"

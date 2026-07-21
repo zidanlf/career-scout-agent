@@ -491,6 +491,7 @@ async fn answer(
 
             let keywords = db.get_user_keywords(user_id).await.unwrap_or_default();
             let banned_keywords = db.get_user_banned_keywords(user_id).await.unwrap_or_default();
+            let proxy_key = config.scrapingant_api_key.as_deref();
             let mut total_scraped = 0;
             let mut new_sent = 0;
             let mut already_processed = 0;
@@ -498,7 +499,7 @@ async fn answer(
             let mut errors = 0;
 
             for url_data in urls {
-                match scrape_job_listings(&url_data.url).await {
+                match scrape_job_listings(&url_data.url, proxy_key).await {
                     jobs => {
                         if jobs.is_empty() {
                             continue;

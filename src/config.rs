@@ -6,6 +6,7 @@ pub struct Config {
     pub zidan_id: i64,
     pub partner_id: i64,
     pub scan_interval_seconds: u64,
+    pub scrapingant_api_key: Option<String>,
 }
 
 impl Config {
@@ -30,11 +31,15 @@ impl Config {
             .parse::<u64>()
             .unwrap_or(120);
 
+        let scrapingant_api_key = env::var("SCRAPINGANT_API_KEY").ok()
+            .filter(|s| !s.trim().is_empty());
+
         Config {
             bot_token,
             zidan_id,
             partner_id,
             scan_interval_seconds,
+            scrapingant_api_key,
         }
     }
 }

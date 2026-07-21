@@ -835,9 +835,69 @@ fn parse_generic(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
     deduplicate_by_link(jobs)
 }
 
+// ============== PROXY DETECTION ==============
+
+/// Check if a URL needs to be routed through ScrapingAnt proxy
+/// (domains blocked by Cloudflare/Akamai on datacenter IPs)
+pub fn needs_proxy(url: &str) -> bool {
+    let domain = match Url::parse(url) {
+        Ok(parsed) => parsed.host_str().unwrap_or("").to_lowercase(),
+        Err(_) => return false,
+    };
+    domain.contains("jobstreet") || domain.contains("glints")
+}
+
+/// Fetch a page through ScrapingAnt API proxy
+async fn fetch_page_via_proxy(url: &str, api_key: &str) -> Option<String> {
+    let client = match build_reqwest_client() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to build reqwest client for proxy: {}", e);
+            return None;
+        }
+    };
+
+    let encoded_url = urlencoding::encode(url);
+    let proxy_url = format!(
+        "https://api.scrapingant.com/v2/general?url={}&x-api-key={}&browser=false",
+        encoded_url, api_key
+    );
+
+    info!("Fetching via ScrapingAnt proxy: {}", url);
+    match client.get(&proxy_url)
+        .timeout(Duration::from_secs(60))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                match resp.text().await {
+                    Ok(text) => {
+                        info!("ScrapingAnt proxy success for: {}", url);
+                        Some(text)
+                    }
+                    Err(e) => {
+                        warn!("Failed to read proxy response body for {}: {}", url, e);
+                        None
+                    }
+                }
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                warn!("ScrapingAnt proxy error {} for {}: {}", status, url, body);
+                None
+            }
+        }
+        Err(e) => {
+            error!("ScrapingAnt proxy request error for {}: {}", url, e);
+            None
+        }
+    }
+}
+
 // ============== CRAWLER EXECUTION ==============
 
-pub async fn scrape_job_listings(url: &str) -> Vec<ScrapedJob> {
+pub async fn scrape_job_listings(url: &str, proxy_api_key: Option<&str>) -> Vec<ScrapedJob> {
     let mut normalized_url = url.to_string();
     if url.contains("jobstreet.co.id") {
         normalized_url = url.replace("www.jobstreet.co.id", "id.jobstreet.com").replace("jobstreet.co.id", "id.jobstreet.com");
@@ -846,11 +906,34 @@ pub async fn scrape_job_listings(url: &str) -> Vec<ScrapedJob> {
 
     info!("Scraping URL: {}", normalized_url);
     let platform = detect_platform(&normalized_url);
-    let html = match fetch_page(&normalized_url).await {
-        Some(h) => h,
-        None => {
-            error!("Failed to fetch page for: {}", normalized_url);
-            return Vec::new();
+
+    // Use proxy for Jobstreet/Glints if API key is available
+    let html = if needs_proxy(&normalized_url) {
+        if let Some(api_key) = proxy_api_key {
+            match fetch_page_via_proxy(&normalized_url, api_key).await {
+                Some(h) => h,
+                None => {
+                    error!("Failed to fetch page via proxy for: {}", normalized_url);
+                    return Vec::new();
+                }
+            }
+        } else {
+            warn!("Proxy needed for {} but no SCRAPINGANT_API_KEY configured, trying direct...", normalized_url);
+            match fetch_page(&normalized_url).await {
+                Some(h) => h,
+                None => {
+                    error!("Failed to fetch page for: {}", normalized_url);
+                    return Vec::new();
+                }
+            }
+        }
+    } else {
+        match fetch_page(&normalized_url).await {
+            Some(h) => h,
+            None => {
+                error!("Failed to fetch page for: {}", normalized_url);
+                return Vec::new();
+            }
         }
     };
 

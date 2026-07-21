@@ -12,19 +12,27 @@ use tokio::time::{sleep, Duration};
 use crate::config::Config;
 use crate::database::Database;
 use crate::bot::{start_bot, format_job_notification, job_matches_filters};
-use crate::scraper::{scrape_job_listings, parse_rss_jobs};
+use crate::scraper::{scrape_job_listings, parse_rss_jobs, needs_proxy};
 
 async fn scheduled_scan_loop(bot: Bot, db: Database, config: Arc<Config>) {
     let mut scan_index = 0;
     let interval = Duration::from_secs(config.scan_interval_seconds);
+    let proxy_interval = Duration::from_secs(600); // 10 minutes for Jobstreet/Glints
+    let mut last_proxy_scan: Option<tokio::time::Instant> = None;
 
-    info!("Background scheduler loop started. Scanning every {} seconds...", config.scan_interval_seconds);
+    info!("Background scheduler loop started. Direct scan every {}s, proxy scan every 600s...", config.scan_interval_seconds);
 
     loop {
         // Run database cleanup at the start of each cycle
         if let Err(e) = db.clean_old_jobs(30).await {
             error!("Database cleanup error: {}", e);
         }
+
+        // Check if it's time to scan proxy URLs
+        let should_scan_proxy = match last_proxy_scan {
+            None => true, // First run
+            Some(last) => last.elapsed() >= proxy_interval,
+        };
 
         match db.get_all_users().await {
             Ok(all_users) => {
@@ -89,13 +97,22 @@ async fn scheduled_scan_loop(bot: Bot, db: Database, config: Arc<Config>) {
                         }
 
                         // 2. Monitored URLs Scan
+                        let proxy_key = config.scrapingant_api_key.as_deref();
                         match db.get_monitored_urls(user_id).await {
                             Ok(urls) => {
                                 if !urls.is_empty() {
                                     let mut sent = 0;
+                                    let mut scanned_proxy = false;
                                     for url_data in urls {
-                                        match scrape_job_listings(&url_data.url).await {
+                                        // Skip proxy URLs if not time yet
+                                        if needs_proxy(&url_data.url) && !should_scan_proxy {
+                                            continue;
+                                        }
+                                        match scrape_job_listings(&url_data.url, proxy_key).await {
                                             jobs => {
+                                                if needs_proxy(&url_data.url) {
+                                                    scanned_proxy = true;
+                                                }
                                                 for job in jobs {
                                                     if !db.check_job_processed(&job.hash, user_id).await.unwrap_or(false) {
                                                         let _ = db.log_processed_job(&job.hash, user_id).await;
@@ -123,6 +140,9 @@ async fn scheduled_scan_loop(bot: Bot, db: Database, config: Arc<Config>) {
                                         }
                                         // Sleep to prevent aggressive scraping
                                         sleep(Duration::from_secs(2)).await;
+                                    }
+                                    if scanned_proxy {
+                                        last_proxy_scan = Some(tokio::time::Instant::now());
                                     }
                                     info!("Monitored URLs scan done for {}: {} notified", user_name, sent);
                                 }
