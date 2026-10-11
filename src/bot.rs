@@ -66,17 +66,31 @@ pub fn clean_company_name(company: &str) -> String {
 }
 
 
+/// Escape text for Telegram HTML parse mode (raw &, <, > make Telegram reject the message)
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 pub fn format_job_notification(job: &ScrapedJob) -> String {
     let platform = job.platform.to_uppercase();
     let company = clean_company_name(&job.company);
+    let location = if job.location.trim().is_empty() { "-" } else { job.location.trim() };
     format!(
         "<b>Job Found in {}!</b>\n\n\
         <pre>\
-        Role    : {}\n\
-        Company : {}\
+        Role     : {}\n\
+        Company  : {}\n\
+        Location : {}\
         </pre>\n\n\
         <a href=\"{}\">Apply Here</a>",
-        platform, job.title, company, job.link
+        escape_html(&platform),
+        escape_html(&job.title),
+        escape_html(&company),
+        escape_html(location),
+        escape_html(&job.link)
     )
 }
 
@@ -459,7 +473,7 @@ async fn answer(
                         TAG   : {}\n\
                         URL   : {}\
                         </pre>\n\
-                        All your monitored URLs will be scanned every 2 minutes when it's your turn.",
+                        All your monitored URLs will be scanned every minute when it's your turn.",
                         new_id, tag, url
                     );
                     bot.send_message(msg.chat.id, confirm)
@@ -492,6 +506,7 @@ async fn answer(
             let keywords = db.get_user_keywords(user_id).await.unwrap_or_default();
             let banned_keywords = db.get_user_banned_keywords(user_id).await.unwrap_or_default();
             let proxy_key = config.scrapingant_api_key.as_deref();
+            let zenrows_key = config.zenrows_api_key.as_deref();
             let mut total_scraped = 0;
             let mut new_sent = 0;
             let mut already_processed = 0;
@@ -499,7 +514,7 @@ async fn answer(
             let mut errors = 0;
 
             for url_data in urls {
-                match scrape_job_listings(&url_data.url, proxy_key).await {
+                match scrape_job_listings(&url_data.url, proxy_key, zenrows_key).await {
                     jobs => {
                         if jobs.is_empty() {
                             continue;

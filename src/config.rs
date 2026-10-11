@@ -7,6 +7,7 @@ pub struct Config {
     pub partner_id: i64,
     pub scan_interval_seconds: u64,
     pub scrapingant_api_key: Option<String>,
+    pub zenrows_api_key: Option<String>,
 }
 
 impl Config {
@@ -27,11 +28,14 @@ impl Config {
             .unwrap_or(0);
             
         let scan_interval_seconds = env::var("SCAN_INTERVAL")
-            .unwrap_or_else(|_| "120".to_string())
+            .unwrap_or_else(|_| "60".to_string())
             .parse::<u64>()
-            .unwrap_or(120);
+            .unwrap_or(60);
 
         let scrapingant_api_key = env::var("SCRAPINGANT_API_KEY").ok()
+            .filter(|s| !s.trim().is_empty());
+
+        let zenrows_api_key = env::var("ZENROWS_API_KEY").ok()
             .filter(|s| !s.trim().is_empty());
 
         Config {
@@ -40,6 +44,7 @@ impl Config {
             partner_id,
             scan_interval_seconds,
             scrapingant_api_key,
+            zenrows_api_key,
         }
     }
 }

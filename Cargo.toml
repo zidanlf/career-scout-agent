@@ -18,6 +18,6 @@ serde_json = "1.0.150"
 sqlx = { version = "0.8.3", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "macros"] }
 teloxide = { version = "0.17.0", default-features = false, features = ["macros", "rustls"] }
 tokio = { version = "1.52.3", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "brotli", "deflate"] }
 url = "2.5.8"
 urlencoding = "2.1"

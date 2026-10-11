@@ -1,7 +1,8 @@
 use reqwest::Client;
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Selector};
 use md5;
 use serde::Serialize;
+use serde_json::Value;
 use log::{info, warn, error};
 use std::collections::HashSet;
 use std::time::Duration;
@@ -12,6 +13,7 @@ use regex::Regex;
 pub struct ScrapedJob {
     pub title: String,
     pub company: String,
+    pub location: String,
     pub link: String,
     pub description: String,
     pub hash: String,
@@ -80,12 +82,13 @@ async fn fetch_page(url: &str) -> Option<String> {
         }
     };
 
+    // Note: Accept-Encoding is intentionally not set here. reqwest adds it automatically
+    // (gzip/br/deflate features) and transparently decompresses the response body.
     let user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
     match client.get(url)
         .header("User-Agent", user_agent)
         .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
         .header("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
-        .header("Accept-Encoding", "gzip, deflate, br")
         .header("sec-ch-ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"")
         .header("sec-ch-ua-mobile", "?0")
         .header("sec-ch-ua-platform", "\"Windows\"")
@@ -134,6 +137,162 @@ fn deduplicate_by_link(jobs: Vec<ScrapedJob>) -> Vec<ScrapedJob> {
     link_map.into_values().collect()
 }
 
+// ============== EXTRACTION HELPERS ==============
+
+/// Collect an element's text with whitespace collapsed to single spaces
+fn element_text(el: &ElementRef) -> String {
+    el.text().flat_map(|t| t.split_whitespace()).collect::<Vec<_>>().join(" ")
+}
+
+/// First non-empty text matched by `selector` inside `scope`
+fn select_first_text(scope: &ElementRef, selector: &Selector) -> Option<String> {
+    scope.select(selector).map(|el| element_text(&el)).find(|t| !t.is_empty())
+}
+
+/// All distinct non-empty texts matched by `selector` inside `scope`, joined with ", "
+fn select_all_text(scope: &ElementRef, selector: &Selector) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for text in scope.select(selector).map(|el| element_text(&el)) {
+        if !text.is_empty() && !parts.contains(&text) {
+            parts.push(text);
+        }
+    }
+    parts.join(", ")
+}
+
+/// Truncate to at most `max` characters without splitting a multi-byte UTF-8 character
+fn truncate_text(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((idx, _)) => text[..idx].to_string(),
+        None => text.to_string(),
+    }
+}
+
+/// Strip HTML tags from a description and truncate it to 500 characters
+fn clean_description(raw: &str) -> String {
+    let text = Html::parse_fragment(raw).root_element().text().collect::<Vec<_>>().join("").trim().to_string();
+    truncate_text(&text, 500)
+}
+
+/// Join non-empty, distinct location parts with ", "
+fn join_location_parts<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for part in parts {
+        let part = part.trim();
+        if !part.is_empty() && !out.contains(&part) {
+            out.push(part);
+        }
+    }
+    out.join(", ")
+}
+
+/// Append a work-arrangement tag (e.g. "Remote") to a location
+fn with_work_tag(location: String, tag: Option<&str>) -> String {
+    match tag {
+        Some(t) if location.is_empty() => t.to_string(),
+        Some(t) => format!("{} ({})", location, t),
+        None => location,
+    }
+}
+
+/// Read a location value that is either a plain string or an object with `label`/`name`
+fn json_label(value: &Value) -> Option<String> {
+    value.as_str()
+        .or_else(|| value.get("label").and_then(|v| v.as_str()))
+        .or_else(|| value.get("name").and_then(|v| v.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Read the location of a schema.org JobPosting (`jobLocation` / `jobLocationType`)
+fn json_ld_location(job: &Value) -> String {
+    let places: Vec<&Value> = match job.get("jobLocation") {
+        Some(Value::Array(arr)) => arr.iter().collect(),
+        Some(v) => vec![v],
+        None => Vec::new(),
+    };
+
+    let mut locations: Vec<String> = Vec::new();
+    for place in places {
+        let address = place.get("address").unwrap_or(place);
+        let loc = match address.as_str() {
+            Some(s) => s.trim().to_string(),
+            None => join_location_parts(
+                ["addressLocality", "addressRegion"].iter()
+                    .filter_map(|k| address.get(*k).and_then(|v| v.as_str()))
+            ),
+        };
+        if !loc.is_empty() && !locations.contains(&loc) {
+            locations.push(loc);
+        }
+    }
+
+    let remote = job.get("jobLocationType").and_then(|v| v.as_str()) == Some("TELECOMMUTE");
+    with_work_tag(locations.join(" | "), remote.then_some("Remote"))
+}
+
+/// Parse schema.org JobPosting entries from JSON-LD scripts
+/// (supports ItemList, a single JobPosting, or an array of JobPostings)
+fn parse_json_ld_jobs(fragment: &Html, base_origin: &str, platform: &str) -> Vec<ScrapedJob> {
+    let mut jobs = Vec::new();
+    let script_selector = Selector::parse("script[type=\"application/ld+json\"]").unwrap();
+
+    for script in fragment.select(&script_selector) {
+        let json_text = script.text().collect::<Vec<_>>().join("");
+        let data = match serde_json::from_str::<Value>(&json_text) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let mut items: Vec<&Value> = Vec::new();
+        if let Some(item_type) = data.get("@type").and_then(|t| t.as_str()) {
+            if item_type == "ItemList" {
+                if let Some(elements) = data.get("itemListElement").and_then(|e| e.as_array()) {
+                    for e in elements {
+                        items.push(e.get("item").unwrap_or(e));
+                    }
+                }
+            } else if item_type == "JobPosting" {
+                items.push(&data);
+            }
+        } else if let Some(arr) = data.as_array() {
+            for job_data in arr {
+                if job_data.get("@type").and_then(|t| t.as_str()) == Some("JobPosting") {
+                    items.push(job_data);
+                }
+            }
+        }
+
+        for job_data in items {
+            let title = job_data.get("title").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
+            if !is_valid_title(&title) {
+                continue;
+            }
+            let company = job_data.get("hiringOrganization").and_then(|o| o.get("name")).and_then(|n| n.as_str()).unwrap_or("Unknown Company").trim().to_string();
+            let mut link = job_data.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
+            if !link.is_empty() && !link.starts_with("http") {
+                link = format!("{}{}", base_origin, link);
+            }
+            if link.is_empty() {
+                continue;
+            }
+            let description = clean_description(job_data.get("description").and_then(|d| d.as_str()).unwrap_or(""));
+
+            jobs.push(ScrapedJob {
+                title,
+                company,
+                location: json_ld_location(job_data),
+                hash: generate_job_hash(&link),
+                link,
+                description,
+                platform: platform.to_string(),
+            });
+        }
+    }
+
+    jobs
+}
+
 // ============== PLATFORM PARSERS ==============
 
 fn parse_linkedin(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
@@ -142,6 +301,7 @@ fn parse_linkedin(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
     let card_selector = Selector::parse(".jobs-search__results-list li, .job-search-card, .base-card").unwrap();
     let title_selector = Selector::parse(".base-search-card__title, .job-card-list__title, h3.base-search-card__title").unwrap();
     let company_selector = Selector::parse(".base-search-card__subtitle, .job-card-container__company-name, h4.base-search-card__subtitle").unwrap();
+    let location_selector = Selector::parse(".job-search-card__location, .job-card-container__metadata-item").unwrap();
     let link_selector = Selector::parse("a.base-card__full-link, a[href*='/jobs/']").unwrap();
 
     for card in fragment.select(&card_selector) {
@@ -159,6 +319,8 @@ fn parse_linkedin(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
             .map(|el| el.text().collect::<Vec<_>>().join("").trim().to_string())
             .unwrap_or_else(|| "Unknown Company".to_string());
 
+        let location = select_first_text(&card, &location_selector).unwrap_or_default();
+
         let link = card.select(&link_selector)
             .next()
             .and_then(|el| el.value().attr("href"))
@@ -172,6 +334,7 @@ fn parse_linkedin(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
         jobs.push(ScrapedJob {
             title,
             company,
+            location,
             hash: generate_job_hash(&link),
             link,
             description: "".to_string(),
@@ -183,116 +346,28 @@ fn parse_linkedin(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
 }
 
 fn parse_jobstreet_html(html: &str, base_url: &str) -> Vec<ScrapedJob> {
-    let mut jobs = Vec::new();
     let fragment = Html::parse_fragment(html);
     let parsed_base = Url::parse(base_url).ok();
     let base_origin = parsed_base.map(|u| format!("{}://{}", u.scheme(), u.host_str().unwrap_or(""))).unwrap_or_else(|| "https://id.jobstreet.com".to_string());
 
     // Strategy 1: JSON-LD
-    let script_selector = Selector::parse("script[type=\"application/ld+json\"]").unwrap();
-    for script in fragment.select(&script_selector) {
-        let json_text = script.text().collect::<Vec<_>>().join("");
-        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&json_text) {
-            if let Some(item_type) = data.get("@type").and_then(|t| t.as_str()) {
-                if item_type == "ItemList" {
-                    if let Some(elements) = data.get("itemListElement").and_then(|e| e.as_array()) {
-                        for item in elements {
-                            let job_data = item.get("item").unwrap_or(item);
-                            let title = job_data.get("title").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
-                            if !is_valid_title(&title) {
-                                continue;
-                            }
-                            let company = job_data.get("hiringOrganization").and_then(|o| o.get("name")).and_then(|n| n.as_str()).unwrap_or("Unknown Company").trim().to_string();
-                            let mut link = job_data.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
-                            if !link.is_empty() && !link.starts_with("http") {
-                                link = format!("{}{}", base_origin, link);
-                            }
-                            if link.is_empty() {
-                                continue;
-                            }
-                            let description = job_data.get("description").and_then(|d| d.as_str()).unwrap_or("");
-                            let clean_desc = Html::parse_fragment(description).root_element().text().collect::<Vec<_>>().join("").trim().to_string();
-                            let truncated_desc = if clean_desc.len() > 500 { clean_desc[..500].to_string() } else { clean_desc };
-
-                            jobs.push(ScrapedJob {
-                                title,
-                                company,
-                                hash: generate_job_hash(&link),
-                                link,
-                                description: truncated_desc,
-                                platform: "jobstreet".to_string(),
-                            });
-                        }
-                    }
-                } else if item_type == "JobPosting" {
-                    let title = data.get("title").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
-                    if is_valid_title(&title) {
-                        let company = data.get("hiringOrganization").and_then(|o| o.get("name")).and_then(|n| n.as_str()).unwrap_or("Unknown Company").trim().to_string();
-                        let mut link = data.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
-                        if !link.is_empty() && !link.starts_with("http") {
-                            link = format!("{}{}", base_origin, link);
-                        }
-                        if !link.is_empty() {
-                            let description = data.get("description").and_then(|d| d.as_str()).unwrap_or("");
-                            let clean_desc = Html::parse_fragment(description).root_element().text().collect::<Vec<_>>().join("").trim().to_string();
-                            let truncated_desc = if clean_desc.len() > 500 { clean_desc[..500].to_string() } else { clean_desc };
-
-                            jobs.push(ScrapedJob {
-                                title,
-                                company,
-                                hash: generate_job_hash(&link),
-                                link,
-                                description: truncated_desc,
-                                platform: "jobstreet".to_string(),
-                            });
-                        }
-                    }
-                }
-            } else if let Some(arr) = data.as_array() {
-                for job_data in arr {
-                    if job_data.get("@type").and_then(|t| t.as_str()) == Some("JobPosting") {
-                        let title = job_data.get("title").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
-                        if is_valid_title(&title) {
-                            let company = job_data.get("hiringOrganization").and_then(|o| o.get("name")).and_then(|n| n.as_str()).unwrap_or("Unknown Company").trim().to_string();
-                            let mut link = job_data.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
-                            if !link.is_empty() && !link.starts_with("http") {
-                                link = format!("{}{}", base_origin, link);
-                            }
-                            if !link.is_empty() {
-                                let description = job_data.get("description").and_then(|d| d.as_str()).unwrap_or("");
-                                let clean_desc = Html::parse_fragment(description).root_element().text().collect::<Vec<_>>().join("").trim().to_string();
-                                let truncated_desc = if clean_desc.len() > 500 { clean_desc[..500].to_string() } else { clean_desc };
-
-                                jobs.push(ScrapedJob {
-                                    title,
-                                    company,
-                                    hash: generate_job_hash(&link),
-                                    link,
-                                    description: truncated_desc,
-                                    platform: "jobstreet".to_string(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+    let jobs = parse_json_ld_jobs(&fragment, &base_origin, "jobstreet");
     if !jobs.is_empty() {
         return deduplicate_by_link(jobs);
     }
+
+    let mut jobs = Vec::new();
 
     // Strategy 2: Next.js __NEXT_DATA__
     let next_selector = Selector::parse("script#__NEXT_DATA__").unwrap();
     if let Some(next_script) = fragment.select(&next_selector).next() {
         let json_text = next_script.text().collect::<Vec<_>>().join("");
-        if let Ok(next_data) = serde_json::from_str::<serde_json::Value>(&json_text) {
-            let props = next_data.get("props").and_then(|p| p.get("pageProps")).unwrap_or(&serde_json::Value::Null);
+        if let Ok(next_data) = serde_json::from_str::<Value>(&json_text) {
+            let props = next_data.get("props").and_then(|p| p.get("pageProps")).unwrap_or(&Value::Null);
             let search_results = props.get("searchResults")
                 .or_else(|| props.get("jobs"))
                 .or_else(|| props.get("data"))
-                .unwrap_or(&serde_json::Value::Null);
+                .unwrap_or(&Value::Null);
 
             let job_list = if search_results.is_object() {
                 search_results.get("data").or_else(|| search_results.get("jobs")).and_then(|j| j.as_array())
@@ -312,6 +387,16 @@ fn parse_jobstreet_html(html: &str, base_url: &str) -> Vec<ScrapedJob> {
                         company = job_data.get("companyName").or_else(|| job_data.get("company")).and_then(|c| c.as_str()).unwrap_or("Unknown Company").trim().to_string();
                     }
 
+                    let location = job_data.get("location").and_then(json_label)
+                        .or_else(|| job_data.get("jobLocation").and_then(json_label))
+                        .or_else(|| {
+                            job_data.get("locations").and_then(|l| l.as_array()).map(|arr| {
+                                let labels: Vec<String> = arr.iter().filter_map(json_label).collect();
+                                join_location_parts(labels.iter().map(|s| s.as_str()))
+                            })
+                        })
+                        .unwrap_or_default();
+
                     let job_id = job_data.get("id").or_else(|| job_data.get("jobId")).and_then(|i| i.as_str()).unwrap_or("");
                     let mut link = job_data.get("listingUrl").or_else(|| job_data.get("url")).and_then(|u| u.as_str()).unwrap_or("").to_string();
                     if link.is_empty() && !job_id.is_empty() {
@@ -324,14 +409,14 @@ fn parse_jobstreet_html(html: &str, base_url: &str) -> Vec<ScrapedJob> {
                         continue;
                     }
                     let teaser = job_data.get("teaser").and_then(|t| t.as_str()).unwrap_or("");
-                    let truncated_teaser = if teaser.len() > 500 { teaser[..500].to_string() } else { teaser.to_string() };
 
                     jobs.push(ScrapedJob {
                         title,
                         company,
+                        location,
                         hash: generate_job_hash(&link),
                         link,
-                        description: truncated_teaser,
+                        description: truncate_text(teaser, 500),
                         platform: "jobstreet".to_string(),
                     });
                 }
@@ -343,45 +428,69 @@ fn parse_jobstreet_html(html: &str, base_url: &str) -> Vec<ScrapedJob> {
         return deduplicate_by_link(jobs);
     }
 
-    // Strategy 3: Card Selectors
-    let card_selector = Selector::parse("article[data-testid*='job-card'], [data-automation='jobListing'], a[data-automation='jobTitle'], a[href*='/id/job/'], a[href*='/job/']").unwrap();
+    // Strategy 3: Job cards. Each card carries data-automation attributes for
+    // title, company and location, so read them all from the same card.
+    let card_selector = Selector::parse("article[data-automation='normalJob'], article[data-automation='premiumJob'], article[data-card-type='JobCard'], article[data-testid*='job-card']").unwrap();
     let title_selector = Selector::parse("[data-automation='jobTitle'], h3, h2").unwrap();
-    let link_selector = Selector::parse("a[href*='/job/'], a[href*='/id/job/']").unwrap();
+    let link_selector = Selector::parse("a[data-automation='jobTitle'], a[href*='/job/']").unwrap();
+    let company_selector = Selector::parse("[data-automation='jobCompany'], [data-automation='jobCardCompanyLink'], [data-automation='advertiser-name']").unwrap();
+    let location_selector = Selector::parse("[data-automation='jobLocation'], [data-automation='jobCardLocation']").unwrap();
 
     let mut seen_links = HashSet::new();
     for card in fragment.select(&card_selector) {
-        let (title, link) = if card.value().name() == "a" {
-            let l = card.value().attr("href").unwrap_or("").to_string();
-            let t = card.text().collect::<Vec<_>>().join("").trim().to_string();
-            (t, l)
-        } else {
-            let t = card.select(&title_selector).next().map(|el| el.text().collect::<Vec<_>>().join("").trim().to_string()).unwrap_or_default();
-            let l = card.select(&link_selector).next().and_then(|el| el.value().attr("href")).unwrap_or("").to_string();
-            (t, l)
-        };
-
+        let title = select_first_text(&card, &title_selector).unwrap_or_default();
         if !is_valid_title(&title) {
             continue;
         }
 
-        let mut full_link = link;
-        if !full_link.is_empty() && !full_link.starts_with("http") {
-            full_link = format!("{}{}", base_origin, full_link);
+        let mut link = card.select(&link_selector).next().and_then(|el| el.value().attr("href")).unwrap_or("").to_string();
+        if !link.is_empty() && !link.starts_with("http") {
+            link = format!("{}{}", base_origin, link);
         }
-
-        if full_link.is_empty() || seen_links.contains(&full_link) {
+        if link.is_empty() || !seen_links.insert(link.clone()) {
             continue;
         }
-        seen_links.insert(full_link.clone());
 
-        // Locate company
-        let company = "Unknown Company".to_string();
+        let company = select_first_text(&card, &company_selector).unwrap_or_else(|| "Unknown Company".to_string());
+        let location = select_all_text(&card, &location_selector);
 
         jobs.push(ScrapedJob {
             title,
             company,
-            hash: generate_job_hash(&full_link),
-            link: full_link,
+            location,
+            hash: generate_job_hash(&link),
+            link,
+            description: "".to_string(),
+            platform: "jobstreet".to_string(),
+        });
+    }
+
+    if !jobs.is_empty() {
+        return deduplicate_by_link(jobs);
+    }
+
+    // Strategy 4: Bare job links (last resort, no card context for company/location)
+    let anchor_selector = Selector::parse("a[data-automation='jobTitle'], a[href*='/id/job/'], a[href*='/job/']").unwrap();
+    for anchor in fragment.select(&anchor_selector) {
+        let title = anchor.text().collect::<Vec<_>>().join("").trim().to_string();
+        if !is_valid_title(&title) {
+            continue;
+        }
+
+        let mut link = anchor.value().attr("href").unwrap_or("").to_string();
+        if !link.is_empty() && !link.starts_with("http") {
+            link = format!("{}{}", base_origin, link);
+        }
+        if link.is_empty() || !seen_links.insert(link.clone()) {
+            continue;
+        }
+
+        jobs.push(ScrapedJob {
+            title,
+            company: "Unknown Company".to_string(),
+            location: "".to_string(),
+            hash: generate_job_hash(&link),
+            link,
             description: "".to_string(),
             platform: "jobstreet".to_string(),
         });
@@ -424,17 +533,15 @@ fn parse_indeed_html(html: &str, base_url: &str) -> Vec<ScrapedJob> {
             .map(|el| el.text().collect::<Vec<_>>().join("").trim().to_string())
             .unwrap_or_else(|| "Unknown Company".to_string());
 
-        let location = card.select(&loc_selector)
-            .next()
-            .map(|el| el.text().collect::<Vec<_>>().join("").trim().to_string())
-            .unwrap_or_default();
+        let location = select_first_text(&card, &loc_selector).unwrap_or_default();
 
         jobs.push(ScrapedJob {
             title,
             company,
+            location,
             hash: generate_job_hash(&link),
             link,
-            description: if location.is_empty() { "".to_string() } else { format!("Lokasi: {}", location) },
+            description: "".to_string(),
             platform: "indeed".to_string(),
         });
     }
@@ -448,7 +555,10 @@ fn parse_loker_id_html(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
     let card_selector = Selector::parse("article.card").unwrap();
     let title_selector = Selector::parse("h3").unwrap();
     let link_selector = Selector::parse("a[href$=\".html\"]").unwrap();
-    let comp_selector = Selector::parse("span.text-secondary-500").unwrap();
+    // Company name is the small span above the title (class changed from -500 to -600)
+    let comp_selector = Selector::parse("span.text-secondary-600, span.text-secondary-500").unwrap();
+    // Location is the span next to the map-pin icon
+    let loc_selector = Selector::parse("span[translate='no']").unwrap();
 
     for card in fragment.select(&card_selector) {
         let title_elem = card.select(&title_selector).next();
@@ -470,14 +580,13 @@ fn parse_loker_id_html(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
             continue;
         }
 
-        let company = card.select(&comp_selector)
-            .next()
-            .map(|el| el.text().collect::<Vec<_>>().join("").trim().to_string())
-            .unwrap_or_else(|| "Unknown Company".to_string());
+        let company = select_first_text(&card, &comp_selector).unwrap_or_else(|| "Unknown Company".to_string());
+        let location = select_first_text(&card, &loc_selector).unwrap_or_default();
 
         jobs.push(ScrapedJob {
             title,
             company,
+            location,
             hash: generate_job_hash(&link),
             link,
             description: "".to_string(),
@@ -494,6 +603,8 @@ fn parse_kitalulus_html(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
     let card_selector = Selector::parse("a[href*=\"/lowongan/detail/\"]").unwrap();
     let title_selector = Selector::parse("h3").unwrap();
     let comp_selector = Selector::parse("p.text-neutral-700.truncate").unwrap();
+    // First detail row (next to the map-pin icon) holds the location
+    let loc_selector = Selector::parse("p.text-neutral-800.text-xs").unwrap();
 
     for card in fragment.select(&card_selector) {
         let title_elem = match card.select(&title_selector).next() {
@@ -519,9 +630,12 @@ fn parse_kitalulus_html(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
             .map(|el| el.text().collect::<Vec<_>>().join("").trim().to_string())
             .unwrap_or_else(|| "Unknown Company".to_string());
 
+        let location = select_first_text(&card, &loc_selector).unwrap_or_default();
+
         jobs.push(ScrapedJob {
             title,
             company,
+            location,
             hash: generate_job_hash(&link),
             link,
             description: "".to_string(),
@@ -533,59 +647,70 @@ fn parse_kitalulus_html(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
 }
 
 fn parse_kalibrr(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
-    let mut jobs = Vec::new();
     let fragment = Html::parse_fragment(html);
 
     // Strategy 1: JSON-LD
-    let script_selector = Selector::parse("script[type=\"application/ld+json\"]").unwrap();
-    for script in fragment.select(&script_selector) {
-        let json_text = script.text().collect::<Vec<_>>().join("");
-        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&json_text) {
-            let mut items = Vec::new();
-            if let Some(item_type) = data.get("@type").and_then(|t| t.as_str()) {
-                if item_type == "ItemList" {
-                    if let Some(elements) = data.get("itemListElement").and_then(|e| e.as_array()) {
-                        for e in elements {
-                            let job_data = e.get("item").unwrap_or(e);
-                            items.push(job_data.clone());
-                        }
-                    }
-                } else if item_type == "JobPosting" {
-                    items.push(data.clone());
-                }
-            } else if let Some(arr) = data.as_array() {
-                for job_data in arr {
-                    if job_data.get("@type").and_then(|t| t.as_str()) == Some("JobPosting") {
-                        items.push(job_data.clone());
-                    }
-                }
-            }
+    let jobs = parse_json_ld_jobs(&fragment, "https://www.kalibrr.com", "kalibrr");
+    if !jobs.is_empty() {
+        return deduplicate_by_link(jobs);
+    }
 
-            for job_data in items {
-                let title = job_data.get("title").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
-                if !is_valid_title(&title) {
-                    continue;
-                }
-                let company = job_data.get("hiringOrganization").and_then(|o| o.get("name")).and_then(|n| n.as_str()).unwrap_or("Unknown Company").trim().to_string();
-                let mut link = job_data.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
-                if !link.is_empty() && !link.starts_with("http") {
-                    link = format!("https://www.kalibrr.com{}", link);
-                }
-                if link.is_empty() {
-                    continue;
-                }
-                let description = job_data.get("description").and_then(|d| d.as_str()).unwrap_or("");
-                let clean_desc = Html::parse_fragment(description).root_element().text().collect::<Vec<_>>().join("").trim().to_string();
-                let truncated_desc = if clean_desc.len() > 500 { clean_desc[..500].to_string() } else { clean_desc };
+    let mut jobs = Vec::new();
 
-                jobs.push(ScrapedJob {
-                    title,
-                    company,
-                    hash: generate_job_hash(&link),
-                    link,
-                    description: truncated_desc,
-                    platform: "kalibrr".to_string(),
-                });
+    // Strategy 2: Next.js __NEXT_DATA__ (props.pageProps.jobs)
+    let next_selector = Selector::parse("script#__NEXT_DATA__").unwrap();
+    if let Some(next_script) = fragment.select(&next_selector).next() {
+        let json_text = next_script.text().collect::<Vec<_>>().join("");
+        if let Ok(next_data) = serde_json::from_str::<Value>(&json_text) {
+            if let Some(job_list) = next_data.pointer("/props/pageProps/jobs").and_then(|j| j.as_array()) {
+                for job_data in job_list {
+                    let title = job_data.get("name").or_else(|| job_data.get("title")).and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
+                    if !is_valid_title(&title) {
+                        continue;
+                    }
+
+                    let company = job_data.get("companyName").and_then(|c| c.as_str())
+                        .or_else(|| job_data.pointer("/company/name").and_then(|c| c.as_str()))
+                        .unwrap_or("Unknown Company").trim().to_string();
+
+                    // Same link format as the job cards: /id-ID/c/{company}/jobs/{id}/{slug}
+                    let company_code = job_data.pointer("/company/code").and_then(|c| c.as_str()).unwrap_or("");
+                    let job_id = match job_data.get("id") {
+                        Some(Value::Number(n)) => n.to_string(),
+                        Some(Value::String(s)) => s.clone(),
+                        _ => String::new(),
+                    };
+                    if company_code.is_empty() || job_id.is_empty() {
+                        continue;
+                    }
+                    let slug = job_data.get("slug").and_then(|s| s.as_str()).unwrap_or("");
+                    let link = if slug.is_empty() {
+                        format!("https://www.kalibrr.com/id-ID/c/{}/jobs/{}", company_code, job_id)
+                    } else {
+                        format!("https://www.kalibrr.com/id-ID/c/{}/jobs/{}/{}", company_code, job_id, slug)
+                    };
+
+                    let location = job_data.pointer("/googleLocation/addressComponents")
+                        .map(|a| join_location_parts(["city", "region"].iter().filter_map(|k| a.get(*k).and_then(|v| v.as_str()))))
+                        .unwrap_or_default();
+                    let work_tag = if job_data.get("isWorkFromHome").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        Some("Remote")
+                    } else if job_data.get("isHybrid").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        Some("Hybrid")
+                    } else {
+                        None
+                    };
+
+                    jobs.push(ScrapedJob {
+                        title,
+                        company,
+                        location: with_work_tag(location, work_tag),
+                        hash: generate_job_hash(&link),
+                        link,
+                        description: clean_description(job_data.get("description").and_then(|d| d.as_str()).unwrap_or("")),
+                        platform: "kalibrr".to_string(),
+                    });
+                }
             }
         }
     }
@@ -594,7 +719,7 @@ fn parse_kalibrr(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
         return deduplicate_by_link(jobs);
     }
 
-    // Strategy 2: Direct CSS
+    // Strategy 3: Direct CSS
     let h2_selector = Selector::parse("h2").unwrap();
     let link_selector = Selector::parse("a[href*=\"/jobs/\"]").unwrap();
     let mut seen_links = HashSet::new();
@@ -619,6 +744,7 @@ fn parse_kalibrr(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
             jobs.push(ScrapedJob {
                 title,
                 company: "Unknown Company".to_string(),
+                location: "".to_string(),
                 hash: generate_job_hash(&link),
                 link,
                 description: "".to_string(),
@@ -630,75 +756,59 @@ fn parse_kalibrr(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
     deduplicate_by_link(jobs)
 }
 
-fn parse_glints(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
-    let mut jobs = Vec::new();
-    let fragment = Html::parse_fragment(html);
+/// Build a Glints location such as "Kebon Jeruk, Jakarta Barat (Remote)"
+fn glints_location(job: &Value) -> String {
+    let mut parts: Vec<&str> = Vec::new();
 
-    // Strategy 1: JSON-LD
-    let script_selector = Selector::parse("script[type=\"application/ld+json\"]").unwrap();
-    for script in fragment.select(&script_selector) {
-        let json_text = script.text().collect::<Vec<_>>().join("");
-        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&json_text) {
-            let mut items = Vec::new();
-            if let Some(item_type) = data.get("@type").and_then(|t| t.as_str()) {
-                if item_type == "ItemList" {
-                    if let Some(elements) = data.get("itemListElement").and_then(|e| e.as_array()) {
-                        for e in elements {
-                            let job_data = e.get("item").unwrap_or(e);
-                            items.push(job_data.clone());
-                        }
-                    }
-                } else if item_type == "JobPosting" {
-                    items.push(data.clone());
+    if let Some(loc) = job.get("location") {
+        if let Some(name) = loc.get("formattedName").or_else(|| loc.get("name")).and_then(|v| v.as_str()) {
+            parts.push(name);
+        }
+        // For district-level locations, also add the city (level 3 parent)
+        if let Some(parents) = loc.get("parents").and_then(|p| p.as_array()) {
+            if let Some(city) = parents.iter().find(|p| p.get("level").and_then(|l| l.as_i64()) == Some(3)) {
+                if let Some(name) = city.get("formattedName").or_else(|| city.get("name")).and_then(|v| v.as_str()) {
+                    parts.push(name);
                 }
-            } else if let Some(arr) = data.as_array() {
-                for job_data in arr {
-                    if job_data.get("@type").and_then(|t| t.as_str()) == Some("JobPosting") {
-                        items.push(job_data.clone());
-                    }
-                }
-            }
-
-            for job_data in items {
-                let title = job_data.get("title").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
-                if !is_valid_title(&title) {
-                    continue;
-                }
-                let company = job_data.get("hiringOrganization").and_then(|o| o.get("name")).and_then(|n| n.as_str()).unwrap_or("Unknown Company").trim().to_string();
-                let mut link = job_data.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
-                if !link.is_empty() && !link.starts_with("http") {
-                    link = format!("https://glints.com{}", link);
-                }
-                if link.is_empty() {
-                    continue;
-                }
-                let description = job_data.get("description").and_then(|d| d.as_str()).unwrap_or("");
-                let clean_desc = Html::parse_fragment(description).root_element().text().collect::<Vec<_>>().join("").trim().to_string();
-                let truncated_desc = if clean_desc.len() > 500 { clean_desc[..500].to_string() } else { clean_desc };
-
-                jobs.push(ScrapedJob {
-                    title,
-                    company,
-                    hash: generate_job_hash(&link),
-                    link,
-                    description: truncated_desc,
-                    platform: "glints".to_string(),
-                });
             }
         }
     }
 
+    if parts.is_empty() {
+        for key in ["citySubDivision", "city", "country"] {
+            if let Some(name) = job.get(key).and_then(|c| c.get("name")).and_then(|v| v.as_str()) {
+                parts.push(name);
+            }
+        }
+    }
+
+    let work_tag = match job.get("workArrangementOption").and_then(|v| v.as_str()) {
+        Some("REMOTE") => Some("Remote"),
+        Some("HYBRID") => Some("Hybrid"),
+        _ => None,
+    };
+
+    with_work_tag(join_location_parts(parts), work_tag)
+}
+
+fn parse_glints(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
+    let fragment = Html::parse_fragment(html);
+
+    // Strategy 1: JSON-LD
+    let jobs = parse_json_ld_jobs(&fragment, "https://glints.com", "glints");
     if !jobs.is_empty() {
         return deduplicate_by_link(jobs);
     }
+
+    let mut jobs = Vec::new();
 
     // Strategy 2: Next.js __NEXT_DATA__
     let next_selector = Selector::parse("script#__NEXT_DATA__").unwrap();
     if let Some(next_script) = fragment.select(&next_selector).next() {
         let json_text = next_script.text().collect::<Vec<_>>().join("");
-        if let Ok(next_data) = serde_json::from_str::<serde_json::Value>(&json_text) {
-            let props = next_data.get("props").and_then(|p| p.get("pageProps")).unwrap_or(&serde_json::Value::Null);
-            let initial_jobs = props.get("initialJobs").unwrap_or(&serde_json::Value::Null);
+        if let Ok(next_data) = serde_json::from_str::<Value>(&json_text) {
+            let props = next_data.get("props").and_then(|p| p.get("pageProps")).unwrap_or(&Value::Null);
+            let initial_jobs = props.get("initialJobs").unwrap_or(&Value::Null);
             let mut job_list = initial_jobs.get("jobsInPage").and_then(|j| j.as_array()).cloned().unwrap_or_default();
 
             if job_list.is_empty() {
@@ -733,16 +843,14 @@ fn parse_glints(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
                 if link.is_empty() {
                     continue;
                 }
-                let description = job_data.get("description").and_then(|d| d.as_str()).unwrap_or("");
-                let clean_desc = Html::parse_fragment(description).root_element().text().collect::<Vec<_>>().join("").trim().to_string();
-                let truncated_desc = if clean_desc.len() > 500 { clean_desc[..500].to_string() } else { clean_desc };
 
                 jobs.push(ScrapedJob {
                     title,
                     company,
+                    location: glints_location(&job_data),
                     hash: generate_job_hash(&link),
                     link,
-                    description: truncated_desc,
+                    description: clean_description(job_data.get("description").and_then(|d| d.as_str()).unwrap_or("")),
                     platform: "glints".to_string(),
                 });
             }
@@ -785,6 +893,7 @@ fn parse_glints(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
         jobs.push(ScrapedJob {
             title,
             company: "Unknown Company".to_string(),
+            location: "".to_string(),
             hash: generate_job_hash(&link),
             link,
             description: "".to_string(),
@@ -801,6 +910,8 @@ fn parse_generic(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
     let card_selector = Selector::parse("article, .job, .vacancy, .listing, li[class*='job']").unwrap();
     let title_selector = Selector::parse("h2, h3, h4").unwrap();
     let link_selector = Selector::parse("a[href*='/job/'], a[href*='/vacancy/'], a[href*='/career/']").unwrap();
+    let company_selector = Selector::parse("[class*='company'], [itemprop='hiringOrganization']").unwrap();
+    let location_selector = Selector::parse("[class*='location'], [itemprop='jobLocation']").unwrap();
 
     for card in fragment.select(&card_selector) {
         let title = card.select(&title_selector)
@@ -822,9 +933,13 @@ fn parse_generic(html: &str, _base_url: &str) -> Vec<ScrapedJob> {
             continue;
         }
 
+        let company = select_first_text(&card, &company_selector).unwrap_or_else(|| "Unknown Company".to_string());
+        let location = select_first_text(&card, &location_selector).unwrap_or_default();
+
         jobs.push(ScrapedJob {
             title,
-            company: "Unknown Company".to_string(),
+            company,
+            location,
             hash: generate_job_hash(&link),
             link,
             description: "".to_string(),
@@ -845,6 +960,15 @@ pub fn needs_proxy(url: &str) -> bool {
         Err(_) => return false,
     };
     domain.contains("jobstreet") || domain.contains("glints")
+}
+
+/// Check if a URL belongs to Indeed
+pub fn is_indeed(url: &str) -> bool {
+    let domain = match Url::parse(url) {
+        Ok(parsed) => parsed.host_str().unwrap_or("").to_lowercase(),
+        Err(_) => return false,
+    };
+    domain.contains("indeed")
 }
 
 /// Fetch a page through ScrapingAnt API proxy
@@ -895,9 +1019,57 @@ async fn fetch_page_via_proxy(url: &str, api_key: &str) -> Option<String> {
     }
 }
 
+/// Fetch a page through ZenRows API proxy (with js_render and premium_proxy to bypass Cloudflare)
+async fn fetch_page_via_zenrows(url: &str, api_key: &str) -> Option<String> {
+    let client = match build_reqwest_client() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to build reqwest client for ZenRows: {}", e);
+            return None;
+        }
+    };
+
+    let encoded_url = urlencoding::encode(url);
+    let zenrows_url = format!(
+        "https://api.zenrows.com/v1/?apikey={}&url={}&js_render=true&premium_proxy=true",
+        api_key, encoded_url
+    );
+
+    info!("Fetching via ZenRows proxy: {}", url);
+    match client.get(&zenrows_url)
+        .timeout(Duration::from_secs(60))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                match resp.text().await {
+                    Ok(text) => {
+                        info!("ZenRows proxy success for: {}", url);
+                        Some(text)
+                    }
+                    Err(e) => {
+                        warn!("Failed to read ZenRows response body for {}: {}", url, e);
+                        None
+                    }
+                }
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                warn!("ZenRows proxy error {} for {}: {}", status, url, body);
+                None
+            }
+        }
+        Err(e) => {
+            error!("ZenRows proxy request error for {}: {}", url, e);
+            None
+        }
+    }
+}
+
 // ============== CRAWLER EXECUTION ==============
 
-pub async fn scrape_job_listings(url: &str, proxy_api_key: Option<&str>) -> Vec<ScrapedJob> {
+pub async fn scrape_job_listings(url: &str, proxy_api_key: Option<&str>, zenrows_api_key: Option<&str>) -> Vec<ScrapedJob> {
     let mut normalized_url = url.to_string();
     if url.contains("jobstreet.co.id") {
         normalized_url = url.replace("www.jobstreet.co.id", "id.jobstreet.com").replace("jobstreet.co.id", "id.jobstreet.com");
@@ -907,8 +1079,26 @@ pub async fn scrape_job_listings(url: &str, proxy_api_key: Option<&str>) -> Vec<
     info!("Scraping URL: {}", normalized_url);
     let platform = detect_platform(&normalized_url);
 
-    // Use proxy for Jobstreet/Glints if API key is available
-    let html = if needs_proxy(&normalized_url) {
+    let html = if is_indeed(&normalized_url) {
+        if let Some(api_key) = zenrows_api_key {
+            match fetch_page_via_zenrows(&normalized_url, api_key).await {
+                Some(h) => h,
+                None => {
+                    error!("Failed to fetch page via ZenRows for: {}", normalized_url);
+                    return Vec::new();
+                }
+            }
+        } else {
+            warn!("ZenRows needed for Indeed but no ZENROWS_API_KEY configured, trying direct...");
+            match fetch_page(&normalized_url).await {
+                Some(h) => h,
+                None => {
+                    error!("Failed to fetch page for: {}", normalized_url);
+                    return Vec::new();
+                }
+            }
+        }
+    } else if needs_proxy(&normalized_url) {
         if let Some(api_key) = proxy_api_key {
             match fetch_page_via_proxy(&normalized_url, api_key).await {
                 Some(h) => h,
@@ -951,6 +1141,14 @@ pub async fn scrape_job_listings(url: &str, proxy_api_key: Option<&str>) -> Vec<
         }
     };
 
+    // A successful fetch that yields zero jobs usually means the page layout changed,
+    // the site served a block/captcha page, or the response could not be decoded.
+    if jobs.is_empty() {
+        warn!("[{}] parsed 0 jobs from {} ({} bytes of HTML)", platform, normalized_url, html.len());
+    } else {
+        info!("[{}] parsed {} jobs from {}", platform, jobs.len(), normalized_url);
+    }
+
     jobs
 }
 
@@ -989,12 +1187,13 @@ pub async fn parse_rss_jobs(rss_url: &str) -> Result<Vec<ScrapedJob>, String> {
             .or_else(|| entry.content.and_then(|c| c.body))
             .unwrap_or_default();
 
-        let clean_desc = Html::parse_fragment(&description).root_element().text().collect::<Vec<_>>().join("").trim().to_string();
-        let truncated_desc = if clean_desc.len() > 500 { clean_desc[..500].to_string() } else { clean_desc };
+        let truncated_desc = clean_description(&description);
 
         jobs.push(ScrapedJob {
             title,
             company,
+            // RSS feeds have no standard location field
+            location: "".to_string(),
             hash: generate_job_hash(&link),
             link,
             description: truncated_desc,
